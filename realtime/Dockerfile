@@ -21,10 +21,6 @@ COPY --from=build_image /app/realtime/node_modules /app/node_modules
 WORKDIR /app
 COPY ./realtime/package.json ./realtime/*.yaml ./
 
-RUN GRPC_HEALTH_PROBE_VERSION=v0.4.7 && \
-    wget -qO/bin/grpc_health_probe https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/${GRPC_HEALTH_PROBE_VERSION}/grpc_health_probe-linux-amd64 && \
-    chmod +x /bin/grpc_health_probe
-
 USER 1000
 
 ARG BUILDTIME
