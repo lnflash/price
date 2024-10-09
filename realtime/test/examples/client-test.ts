@@ -17,13 +17,20 @@ const client2 = new protoDescriptorHealth.grpc.health.v1.Health(
   grpc.credentials.createInsecure(),
 )
 
-client.listCurrencies({}, callback)
-client.getPrice({}, callback)
+client.listCurrencies({}, fetchPrices)
+function fetchPrices(err, data) {
+  if (err) {
+    logger.error({ err })
+    return
+  }
+  logger.info(data.currencies, "currencies")
+  data.currencies.forEach(c => {
+    console.log(c.code)
+    client.getPrice({ currency: c.code }, printResp)
+  })
+}
 
-client.getPrice({ currency: "EUR" }, callback)
-client.getPrice({ currency: "USD" }, callback)
-
-function callback(err, data) {
+function printResp(err, data) {
   if (err) {
     logger.error({ err })
     return
