@@ -13,6 +13,7 @@ import { baseLogger } from "@services/logger"
 import IbexClient from "ibex-client"
 import { ApiError, AuthenticationError } from "ibex-client/dist/errors"
 import { IBEX } from "@config"
+import { AuthCache } from "./cache"
 
 const mutex = new Mutex()
 export const IbexExchangeService = async ({
@@ -29,7 +30,8 @@ export const IbexExchangeService = async ({
     {
       email: IBEX.email,
       password: IBEX.password,
-    }
+    },
+    AuthCache,
   );
 
   const cacheKey = `${CacheKeys.CurrentTicker}:Ibex:${base}:${quote}`
@@ -77,7 +79,7 @@ export const IbexExchangeService = async ({
       if (ibexResp instanceof ApiError) {
         await LocalCacheService().set<number>({
           key: cacheKeyStatus,
-          value: ibexResp.code,
+          value: 0,
           ttlSecs: toSeconds(cacheTtlSecs > 0 ? cacheTtlSecs : 300),
         })
         return new UnknownExchangeServiceError(ibexResp.message)

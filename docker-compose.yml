@@ -21,3 +21,11 @@ services:
       - ${HOST_PROJECT_PATH:-.}/dev/otel-agent-config.yaml:/etc/otel-agent-config.yaml
     ports:
       - "4318:4318" # otlp http receiver
+  
+  redis:
+    image: redis:7.0.8
+    ports:
+      - "6379:6379"
+    environment:
+      - ALLOW_EMPTY_PASSWORD=yes
+      - REDIS_DISABLE_COMMANDS=FLUSHDB,FLUSHALL
