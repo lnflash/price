@@ -9,10 +9,10 @@ export ref=$(cat ./repo/.git/short_ref)
 
 pushd charts-repo
 
-yq -i e '.realtime.image.digest = strenv(digest)' ./charts/galoy/charts/price/values.yaml
-yq -i e '.realtime.image.git_ref = strenv(ref)' ./charts/galoy/charts/price/values.yaml
-yq -i e '.history.image.digest = strenv(history_digest)' ./charts/galoy/charts/price/values.yaml
-yq -i e '.history.migrateImage.digest = strenv(history_migrate_digest)' ./charts/galoy/charts/price/values.yaml
+yq -i e '.realtime.image.digest = strenv(digest)' ./charts/price/values.yaml
+yq -i e '.realtime.image.git_ref = strenv(ref)' ./charts/price/values.yaml
+yq -i e '.history.image.digest = strenv(history_digest)' ./charts/price/values.yaml
+yq -i e '.history.migrateImage.digest = strenv(history_migrate_digest)' ./charts/price/values.yaml
 
 if [[ -z $(git config --global user.email) ]]; then
   git config --global user.email "bot@galoy.io"
