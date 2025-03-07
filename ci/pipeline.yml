@@ -1,26 +1,30 @@
 #@ load("@ytt:data", "data")
 
-#@ def pipeline_image():
-#@   return data.values.docker_registry + "/nodejs-concourse"
+#@ def galoy_docker_registry():
+#@  return "us.gcr.io/galoy-org"
 #@ end
 
-#@ def galoy_image():
+#@ def pipeline_image():
+#@   return galoy_docker_registry() + "/nodejs-concourse"
+#@ end
+
+#@ def price_image():
 #@   return data.values.docker_registry + "/price"
 #@ end
 
-#@ def galoy_history_image():
+#@ def price_history_image():
 #@   return data.values.docker_registry + "/price-history"
 #@ end
 
-#@ def galoy_history_migrate_image():
+#@ def migrate_history_image():
 #@   return data.values.docker_registry + "/price-history-migrate"
 #@ end
 
 #@ def task_image_config():
 type: registry-image
 source:
-  username: #@ data.values.docker_registry_user
-  password: #@ data.values.docker_registry_password
+  #! username: #@ data.values.docker_registry_user
+  #! password: #@ data.values.docker_registry_password
   repository: #@ pipeline_image()
 #@ end
 
@@ -167,8 +171,9 @@ jobs:
       - name: history-migrate-edge-image
       - name: charts-repo
       params:
-        GH_APP_ID: #@ data.values.github_app_id
-        GH_APP_PRIVATE_KEY: #@ data.values.github_app_private_key
+        #! GH_APP_ID: #@ data.values.github_app_id
+        #! GH_APP_PRIVATE_KEY: #@ data.values.github_app_private_key
+        GH_TOKEN: #@ data.values.github_token
         BRANCH: #@ data.values.git_charts_branch
         BOT_BRANCH: #@ data.values.git_charts_bot_branch
       run:
@@ -181,21 +186,27 @@ resources:
     ignore_paths: ["ci/*[^md]"]
     uri: #@ data.values.git_uri
     branch: #@ data.values.git_branch
-    private_key: #@ data.values.github_private_key
+    username: #@ data.values.gh_user
+    password: #@ data.values.gh_password
+    #! private_key: #@ data.values.github_private_key
 
 - name: charts-repo-bot-branch
   type: git
   source:
     uri: #@ data.values.git_charts_uri
     branch: #@ data.values.git_charts_bot_branch
-    private_key: #@ data.values.github_private_key
+    username: #@ data.values.gh_user
+    password: #@ data.values.gh_password
+    #! private_key: #@ data.values.github_private_key
 
 - name: charts-repo
   type: git
   source:
     uri: #@ data.values.git_charts_uri
     branch: #@ data.values.git_charts_branch
-    private_key: #@ data.values.github_private_key
+    username: #@ data.values.gh_user
+    password: #@ data.values.gh_password
+    #! private_key: #@ data.values.github_private_key
 
 - name: edge-image
   type: registry-image
@@ -203,7 +214,7 @@ resources:
     tag: edge
     username: #@ data.values.docker_registry_user
     password: #@ data.values.docker_registry_password
-    repository: #@ galoy_image()
+    repository: #@ price_image()
 
 - name: history-edge-image
   type: registry-image
@@ -211,7 +222,7 @@ resources:
     tag: edge
     username: #@ data.values.docker_registry_user
     password: #@ data.values.docker_registry_password
-    repository: #@ galoy_history_image()
+    repository: #@ price_history_image()
 
 - name: history-migrate-edge-image
   type: registry-image
@@ -219,7 +230,7 @@ resources:
     tag: edge
     username: #@ data.values.docker_registry_user
     password: #@ data.values.docker_registry_password
-    repository: #@ galoy_history_migrate_image()
+    repository: #@ migrate_history_image()
 
 - name: pipeline-tasks
   type: git
@@ -227,4 +238,6 @@ resources:
     paths: [ci/tasks/*, Makefile]
     uri: #@ data.values.git_uri
     branch: #@ data.values.git_branch
-    private_key: #@ data.values.github_private_key
+    username: #@ data.values.gh_user
+    password: #@ data.values.gh_password
+    #! private_key: #@ data.values.github_private_key
