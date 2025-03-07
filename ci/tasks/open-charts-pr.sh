@@ -36,7 +36,7 @@ https://github.com/lnflash/price/compare/${old_ref}...${ref}
 EOF
 
 # export GH_TOKEN="$(ghtoken generate -b "${GH_APP_PRIVATE_KEY}" -i "${GH_APP_ID}" | jq -r '.token')"
-export GH_TOKEN=${AUTH_TOKEN}
+export GH_TOKEN=${GH_TOKEN}
 gh auth setup-git
 
 gh repo set-default ${GH_ORG}/charts
