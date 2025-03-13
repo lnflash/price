@@ -9,10 +9,35 @@ export const IBEX = {
   password: process.env.IBEX_PASSWORD as string
 }
 
-export const REDIS = {
-  name: process.env.REDIS_MASTER_NAME as string,
-  host: process.env.REDIS_0_DNS as string,
-  port: parseInt(process.env.REDIS_0_PORT as string, 10),
-  password: process.env.REDIS_PASSWORD as string,
+let connectionObj = {}
+
+if (process.env.REDIS_TYPE === "standalone") {
+  connectionObj = {
+    name: process.env.REDIS_MASTER_NAME,
+    host: process.env.REDIS_0_DNS,
+    port: process.env.REDIS_0_PORT,
+    password: process.env.REDIS_PASSWORD,
+  }
+} else {
+  connectionObj = {
+    sentinelPassword: process.env.REDIS_PASSWORD,
+    sentinels: [
+      {
+        host: `${process.env.REDIS_0_DNS}`,
+        port: process.env.REDIS_0_PORT,
+      },
+      {
+        host: `${process.env.REDIS_1_DNS}`,
+        port: process.env.REDIS_1_PORT,
+      },
+      {
+        host: `${process.env.REDIS_2_DNS}`,
+        port: process.env.REDIS_2_PORT,
+      },
+    ],
+    name: process.env.REDIS_MASTER_NAME,
+    password: process.env.REDIS_PASSWORD,
+  }
 }
-// export REDIS_TYPE="standalone"
+
+export const REDIS = connectionObj
