@@ -107,6 +107,7 @@ export const getExchangesConfig = (): (DevExchangeConfig | ExchangeConfig)[] => 
         provider: e.provider,
         cron: e.cron,
         config: e.config,
+        rates: e.rates,
       }
     })
 

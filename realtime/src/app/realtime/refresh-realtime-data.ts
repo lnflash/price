@@ -3,6 +3,7 @@ import { baseLogger } from "@services/logger"
 import { toCurrency } from "@domain/primitives"
 import { ExchangeFactory } from "@services/exchanges"
 import { RealtimePriceRepository } from "@services/realtime-price"
+import { ExchangeServiceError } from "@domain/exchanges"
 
 const exchangeFactory = ExchangeFactory()
 const realtimePriceRepository = RealtimePriceRepository()
@@ -12,9 +13,9 @@ export const refreshRealtimeData = async ({
   exchange,
 }: RefreshRealtimeDataArgs): Promise<Ticker | ApplicationError> => {
   const exchangeService = await exchangeFactory.create(exchange)
-  if (exchangeService instanceof Error) {
+  if (exchangeService instanceof ExchangeServiceError) {
     baseLogger.warn(
-      { error: exchangeService, exchange },
+      { error: { ...exchangeService, message: exchangeService.message }, exchange },
       "Error initializing exchange service",
     )
     return exchangeService

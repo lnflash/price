@@ -20,3 +20,4 @@ type ExchangeFactory = {
     config: DevExchangeConfig | ExchangeConfig,
   ): Promise<IExchangeService | ExchangeServiceError>
 }
+

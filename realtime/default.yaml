@@ -26,6 +26,18 @@ exchanges:
   cron: "*/15 * * * * *"
   config:
     cacheSeconds: 180
+- name: "First Global Bank Jamaica"
+  enabled: true
+  quoteAlias: "*"
+  base: "USD"
+  quote: "JMD"
+  provider: "first-global"
+  cron: "15 * * * * *"
+  rates:
+    USD:
+      JMD:
+        bid: 152
+        ask: 159
 - name: "free-currency-rates-usd"
   enabled: true
   quoteAlias: "*"
@@ -43,7 +55,7 @@ exchanges:
   quoteAlias: "*"
   base: "BTC"
   quote: "*"
-  excludedQuotes: ["USD"]
+  excludedQuotes: ["USD", "JMD"]
   provider: "ccxt"
   cron: "*/20 * * * * *"
 - name: "bitstamp"
@@ -51,7 +63,7 @@ exchanges:
   quoteAlias: "*"
   base: "BTC"
   quote: "*"
-  excludedQuotes: ["USD"]
+  excludedQuotes: ["USD", "JMD"]
   provider: "ccxt"
   cron: "*/15 * * * * *"
 

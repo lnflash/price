@@ -51,11 +51,13 @@ export const configSchema = {
               "exchangeratesapi",
               "exchangeratehost",
               "yadio",
-              "ibex"
+              "ibex",
+              "first-global"
             ],
           },
           cron: { type: "string" },
           config: { type: "object" },
+          rates: { type: "object" },
         },
         required: ["name", "base", "quote", "provider", "cron"],
         additionalProperties: false,
