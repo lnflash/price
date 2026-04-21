@@ -28,7 +28,7 @@ const getPrice = wrapAsyncToRunInSpan({
   fnName: "getPrice",
   fn: async (
     { request }: grpc.ServerUnaryCall<{ currency: string }, unknown>,
-    callback: grpc.sendUnaryData<{ price: Price }>,
+    callback: grpc.sendUnaryData<{ price: Price; price_v2: Price }>,
   ) => {
     const currency = request.currency
     const price = await Realtime.getPrice(currency)
@@ -40,7 +40,13 @@ const getPrice = wrapAsyncToRunInSpan({
       })
     }
 
-    return callback(null, { price })
+    // ENG-317 / Phase A: populate both the legacy float field (`price`) and
+    // the new double field (`price_v2`) from the same source value. The
+    // float wire encoding will quantise `price` to ~24 bits of mantissa;
+    // `price_v2` carries the full float64 we computed. Clients prefer
+    // `price_v2` and fall back to `price` only when talking to a server
+    // that pre-dates this change. Phase B will drop `price` entirely.
+    return callback(null, { price, price_v2: price })
   },
 })
 
