@@ -25,7 +25,9 @@ const listPrices = wrapAsyncToRunInSpan({
   fnName: "listPrices",
   fn: async (
     { request }: grpc.ServerUnaryCall<GetPriceHistoryArgs, unknown>,
-    callback: grpc.sendUnaryData<{ priceHistory: Tick[] }>,
+    callback: grpc.sendUnaryData<{
+      priceHistory: Array<Tick & { price_v2: number }>
+    }>,
   ) => {
     const { currency, range } = request
     const priceHistory = await History.getPriceHistory({ currency, range })
@@ -40,7 +42,17 @@ const listPrices = wrapAsyncToRunInSpan({
       })
     }
 
-    return callback(null, { priceHistory })
+    // ENG-317 / Phase A: populate both `price` (deprecated float32) and
+    // `price_v2` (double) on every Tick from the same source value. The
+    // wire will quantise `price` through float32; `price_v2` preserves
+    // the full float64. See realtime/run.ts and the proto for the full
+    // rollout plan.
+    const priceHistoryWithDouble = priceHistory.map((t) => ({
+      ...t,
+      price_v2: t.price,
+    }))
+
+    return callback(null, { priceHistory: priceHistoryWithDouble })
   },
 })
 
