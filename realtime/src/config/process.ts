@@ -4,9 +4,9 @@ export const tracingConfig = {
 }
 
 export const IBEX = {
-  url: process.env.IBEX_URL as string,
-  email: process.env.IBEX_EMAIL as string,
-  password: process.env.IBEX_PASSWORD as string
+  clientId: process.env.IBEX_CLIENT_ID as string,
+  clientSecret: process.env.IBEX_CLIENT_SECRET as string,
+  environment: (process.env.IBEX_ENVIRONMENT || "sandbox") as "production" | "sandbox",
 }
 
 let connectionObj = {}
