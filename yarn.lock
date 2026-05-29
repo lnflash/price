@@ -3710,10 +3710,10 @@ human-signals@^4.3.0:
   resolved "https://registry.npmjs.org/human-signals/-/human-signals-4.3.1.tgz"
   integrity sha512-nZXjEF2nbo7lIw3mgYjItAfgQXog3OjJogSbKa2CQIIvSGWcKgeJnQlNXip6NglNzYH45nSRiEVimMvYL8DDqQ==
 
-ibex-client@^2.1.0:
-  version "2.1.0"
-  resolved "https://registry.yarnpkg.com/ibex-client/-/ibex-client-2.1.0.tgz#b6b8599355c8f04937aadb08f2eff34dc7d38acb"
-  integrity sha512-iU2DZxNma/Oyxes/CvOT2mly9IKKe2XMVGkF2NNAIrd5YUP6MGlRyA/n9LLwkTPL5BlP1cMyR8kjsysu44f9kQ==
+ibex-client@^3.0.0:
+  version "3.0.0"
+  resolved "https://registry.yarnpkg.com/ibex-client/-/ibex-client-3.0.0.tgz#963ced9561b1e2cea0cec876ebf282f62ef69540"
+  integrity sha512-ATfB1qptJLv2C7K0bzzZCjTSYgJO/ihx059FCT+DjngfSkijJLOdFdFepQTcy7Cadh1ij5TdFa5+jYbr3ZiViw==
   dependencies:
     api "^6.1.2"
     node-cache "^5.1.2"

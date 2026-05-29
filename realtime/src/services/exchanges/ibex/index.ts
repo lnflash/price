@@ -26,10 +26,10 @@ export const IbexExchangeService = async ({
   const cacheSeconds = config?.cacheSeconds || 180 
 
   const Ibex = new IbexClient(
-    IBEX.url, 
     {
-      email: IBEX.email,
-      password: IBEX.password,
+      clientId: IBEX.clientId,
+      clientSecret: IBEX.clientSecret,
+      environment: IBEX.environment,
     },
     AuthCache,
   );

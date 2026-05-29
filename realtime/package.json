@@ -37,7 +37,7 @@
     "ccxt": "^4.1.70",
     "dotenv": "^16.0.3",
     "grpc-health-check": "^2.0.0",
-    "ibex-client": "^2.1.0",
+    "ibex-client": "^3.0.0",
     "ioredis": "^5.5.0",
     "ioredis-cache": "^2.0.3",
     "js-yaml": "^4.1.0",
