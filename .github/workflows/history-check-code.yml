@@ -1,14 +1,14 @@
 name: "History Check code"
 on:
   push:
-    branches: [main]
+    branches: [ main ]
     paths:
       - "Makefile"
       - "*.json"
       - "yarn.lock"
       - "history/**"
   pull_request:
-    branches: [main]
+    branches: [ main ]
     paths:
       - "Makefile"
       - "*.json"

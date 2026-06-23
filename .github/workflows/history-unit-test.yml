@@ -1,14 +1,14 @@
 name: "History Unit test"
 on:
   push:
-    branches: [main]
+    branches: [ main ]
     paths:
       - "Makefile"
       - "*.json"
       - "yarn.lock"
       - "history/**"
   pull_request:
-    branches: [main]
+    branches: [ main ]
     paths:
       - "Makefile"
       - "*.json"
