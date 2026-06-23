@@ -7,9 +7,20 @@
   ],
   "version": "1.0.0",
   "scripts": {
+    "audit:prod:high": "yarn audit --groups dependencies --level high --json | node scripts/audit-high.js",
     "clean": "rm -rf history/dist realtime/dist",
     "history": ". ./.envrc && yarn workspace history",
     "realtime": ". ./.envrc && yarn workspace realtime"
+  },
+  "resolutions": {
+    "braces": "^3.0.3",
+    "cross-spawn": "^7.0.6",
+    "jsonpath-plus": "^10.3.0",
+    "lodash": "^4.18.1",
+    "minimatch": "^5.1.7",
+    "picomatch": "^2.3.2",
+    "protobufjs": "^7.6.1",
+    "ws": "^8.21.0"
   },
   "repository": "git@github.com:GaloyMoney/price.git",
   "author": "dev@galoy.io",

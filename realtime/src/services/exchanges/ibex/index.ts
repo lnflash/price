@@ -13,6 +13,7 @@ import { baseLogger } from "@services/logger"
 import IbexClient from "ibex-client"
 import { ApiError, AuthenticationError } from "ibex-client/dist/errors"
 import { IBEX } from "@config"
+
 import { AuthCache } from "./cache"
 
 const mutex = new Mutex()
@@ -20,10 +21,12 @@ export const IbexExchangeService = async ({
   base,
   quote,
   config,
-}: IbexExchangeServiceArgs) : Promise<
-  IExchangeService | ExchangeServiceError
-> => {
-  const cacheSeconds = config?.cacheSeconds || 180 
+}: IbexExchangeServiceArgs): Promise<IExchangeService | ExchangeServiceError> => {
+  const cacheSeconds = config?.cacheSeconds || 180
+
+  if (!IBEX.clientId || !IBEX.clientSecret) {
+    return new InvalidExchangeConfigError("IBEX client credentials are required")
+  }
 
   const Ibex = new IbexClient(
     {
@@ -32,7 +35,7 @@ export const IbexExchangeService = async ({
       environment: IBEX.environment,
     },
     AuthCache,
-  );
+  )
 
   const cacheKey = `${CacheKeys.CurrentTicker}:Ibex:${base}:${quote}`
   const cacheTtlSecs = Number(cacheSeconds)
@@ -66,11 +69,13 @@ export const IbexExchangeService = async ({
           `Previous request failed. Error ${lastCachedStatus}`,
         )
 
-      const primary_currency_id = getIbexId(base);
-      const secondary_currency_id = getIbexId(quote);
-      if (primary_currency_id === undefined) return new ExchangeServiceError(`Ibex Id not found for currency ${base}`)
-      if (secondary_currency_id === undefined) return new ExchangeServiceError(`Ibex Id not found for currency ${quote}`)
-      const ibexResp = await Ibex.getRate({ 
+      const primary_currency_id = getIbexId(base)
+      const secondary_currency_id = getIbexId(quote)
+      if (primary_currency_id === undefined)
+        return new ExchangeServiceError(`Ibex Id not found for currency ${base}`)
+      if (secondary_currency_id === undefined)
+        return new ExchangeServiceError(`Ibex Id not found for currency ${quote}`)
+      const ibexResp = await Ibex.getRate({
         primary_currency_id: primary_currency_id,
         secondary_currency_id: secondary_currency_id,
       })
@@ -84,9 +89,11 @@ export const IbexExchangeService = async ({
         })
         return new UnknownExchangeServiceError(ibexResp.message)
       }
-      if (ibexResp instanceof AuthenticationError) return new ExchangeServiceError(ibexResp.message)
+      if (ibexResp instanceof AuthenticationError)
+        return new ExchangeServiceError(ibexResp.message)
 
-      if (!ibexResp.rate) return new UnknownExchangeServiceError("Invalid Response. No rate found.")
+      if (!ibexResp.rate)
+        return new UnknownExchangeServiceError("Invalid Response. No rate found.")
       await LocalCacheService().set<IbexRates>({
         key: cacheKey,
         value: { [quote]: ibexResp.rate },
@@ -94,30 +101,19 @@ export const IbexExchangeService = async ({
       })
 
       // return tickerFromRaw({ rate: rates[quote], timestamp })
-      return tickerFromRaw({ rate: ibexResp.rate, timestamp: ibexResp.updatedAtUnix || new Date().getTime() })
+      return tickerFromRaw({
+        rate: ibexResp.rate,
+        timestamp: ibexResp.updatedAtUnix || new Date().getTime(),
+      })
     } catch (error) {
       baseLogger.error({ error }, "Ibex unknown error")
       return new UnknownExchangeServiceError(error.message || error)
     }
   }
-  
+
   return {
     fetchTicker: () => mutex.runExclusive(fetchTicker),
   }
-}
-
-const isRatesObjectValid = (rates: unknown): rates is IbexRates => {
-  if (!rates || typeof rates !== "object") return false
-
-  let keyCount = 0
-  for (const key in rates) {
-    if (typeof key !== "string" || typeof rates[key] !== "number") {
-      return false
-    }
-    keyCount++
-  }
-
-  return !!keyCount
 }
 
 const tickerFromRaw = ({
@@ -138,8 +134,8 @@ const tickerFromRaw = ({
   return new InvalidTickerError()
 }
 
-
-const getIbexId = (name: string) => ibexCurrencies.find(el => el.name === name)?.id
+const getIbexId = (name: string) => ibexCurrencies.find((el) => el.name === name)?.id
+// prettier-ignore
 const ibexCurrencies = [
       {
           "id": 0,
@@ -352,4 +348,3 @@ const ibexCurrencies = [
           "accountEnabled": true
       }
 ]
-

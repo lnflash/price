@@ -3,10 +3,16 @@ export const tracingConfig = {
   enableFilter: process.env.TRACING_ENABLE_FILTER === "true",
 }
 
+const ibexEnvironment: "sandbox" | "production" =
+  process.env.IBEX_ENVIRONMENT === "sandbox" ||
+  (!process.env.IBEX_ENVIRONMENT && process.env.IBEX_URL?.includes("sandbox"))
+    ? "sandbox"
+    : "production"
+
 export const IBEX = {
-  clientId: process.env.IBEX_CLIENT_ID as string,
-  clientSecret: process.env.IBEX_CLIENT_SECRET as string,
-  environment: (process.env.IBEX_ENVIRONMENT || "sandbox") as "production" | "sandbox",
+  clientId: (process.env.IBEX_CLIENT_ID || process.env.IBEX_EMAIL) as string,
+  clientSecret: (process.env.IBEX_CLIENT_SECRET || process.env.IBEX_PASSWORD) as string,
+  environment: ibexEnvironment,
 }
 
 let connectionObj = {}

@@ -1,9 +1,30 @@
 import {
   coerceToStringArray,
   ConfigError,
+  getCustomConfigPath,
   getFractionDigits,
   supportedCurrencies,
 } from "@config"
+
+describe("getCustomConfigPath", () => {
+  const originalYamlConfigPath = process.env.YAML_CONFIG_PATH
+
+  afterEach(() => {
+    process.env.YAML_CONFIG_PATH = originalYamlConfigPath
+  })
+
+  it("uses the default mounted config path when YAML_CONFIG_PATH is not set", () => {
+    delete process.env.YAML_CONFIG_PATH
+
+    expect(getCustomConfigPath()).toBe("/var/yaml/custom.yaml")
+  })
+
+  it("uses YAML_CONFIG_PATH when it is set", () => {
+    process.env.YAML_CONFIG_PATH = "/tmp/price-custom.yaml"
+
+    expect(getCustomConfigPath()).toBe("/tmp/price-custom.yaml")
+  })
+})
 
 describe("coerceToStringArray", () => {
   it("returns an empty array if the input is falsy", () => {
@@ -84,50 +105,12 @@ describe("supportedCurrencies", () => {
       "VI",
     ]
 
-    const expectedEurCountries = [
-      "AD",
-      "AT",
-      "AX",
-      "BE",
-      "BL",
-      "CY",
-      "DE",
-      "EE",
-      "ES",
-      "FI",
-      "FR",
-      "GF",
-      "GP",
-      "GR",
-      "HR",
-      "IE",
-      "IT",
-      "LT",
-      "LU",
-      "LV",
-      "MC",
-      "ME",
-      "MF",
-      "MQ",
-      "MT",
-      "NL",
-      "PM",
-      "PT",
-      "RE",
-      "SI",
-      "SK",
-      "SM",
-      "TF",
-      "VA",
-      "YT",
-    ]
-
     const usdCurrency = supportedCurrencies.find((c) => c.code === "USD")
     if (usdCurrency === undefined) throw new Error()
     expect(usdCurrency.countryCodes).toEqual(expectedUsdCountries)
 
-    const eurCurrency = supportedCurrencies.find((c) => c.code === "EUR")
-    if (eurCurrency === undefined) throw new Error()
-    expect(eurCurrency.countryCodes).toEqual(expectedEurCountries)
+    const jmdCurrency = supportedCurrencies.find((c) => c.code === "JMD")
+    if (jmdCurrency === undefined) throw new Error()
+    expect(jmdCurrency.countryCodes).toEqual(["JM"])
   })
 })
