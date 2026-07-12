@@ -52,6 +52,7 @@ export const configSchema = {
               "exchangeratehost",
               "yadio",
               "ibex",
+              "ibex-swap",
             ],
           },
           cron: { type: "string" },

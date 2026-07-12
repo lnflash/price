@@ -11,3 +11,15 @@ exchanges:
     # Following require dummy values
     name: ""
     cron: "*/5 * * * * *"
+  # IBEX "Swap Rates" (GET /rates) — fee/spread-inclusive executable rates,
+  # vs the legacy "ibex" provider (Rates v2, mid-market-ish, display-only).
+  # Requires IBEX_CLIENT_ID / IBEX_CLIENT_SECRET / IBEX_ENVIRONMENT.
+  - name: "IbexSwap"
+    enabled: false
+    quoteAlias: "*"
+    base: "BTC"
+    quote: "USD"
+    provider: "ibex-swap"
+    cron: "*/15 * * * * *"
+    config:
+      cacheSeconds: 180

@@ -8,6 +8,7 @@ import { ExchangeRatesAPIExchangeService } from "./exchange-rates-api"
 import { FreeCurrencyRatesExchangeService } from "./free-currency-rates"
 import { MockedExchangeService } from "./mocked"
 import { IbexExchangeService } from "./ibex"
+import { IbexSwapExchangeService } from "./ibex-swap"
 
 const exchanges: { [key: string]: IExchangeService } = {}
 
@@ -56,6 +57,9 @@ export const ExchangeFactory = (): ExchangeFactory => {
         break
       case "ibex":
         service = await createIbex(config)
+        break
+      case "ibex-swap":
+        service = await createIbexSwap(config)
         break
     }
     if (service instanceof Error) return service
@@ -133,6 +137,16 @@ const createIbex = async (config: ExchangeConfig) => {
   const { base, quote } = config
   const defaultConfig = { timeout: 5000 }
   return IbexExchangeService({
+    base: base,
+    quote: quote,
+    config: { ...defaultConfig, ...config.config },
+  })
+}
+
+const createIbexSwap = async (config: ExchangeConfig) => {
+  const { base, quote } = config
+  const defaultConfig = { timeout: 5000 }
+  return IbexSwapExchangeService({
     base: base,
     quote: quote,
     config: { ...defaultConfig, ...config.config },
