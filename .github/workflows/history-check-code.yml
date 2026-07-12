@@ -1,20 +1,29 @@
 name: "History Check code"
 on:
+  push:
+    branches: [ main ]
+    paths:
+      - "Makefile"
+      - "*.json"
+      - "yarn.lock"
+      - "history/**"
   pull_request:
     branches: [ main ]
     paths:
       - "Makefile"
       - "*.json"
+      - "yarn.lock"
       - "history/**"
 jobs:
   check-code:
     name: Check Code
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
-    - uses: actions/setup-node@v3
-      with:
-        node-version: 20
-    - run: yarn install
-    - name: Run check code
-      run: make history-check-code
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: yarn
+      - run: yarn install --frozen-lockfile
+      - name: Run check code
+        run: make history-check-code

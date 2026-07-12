@@ -2,14 +2,15 @@ import { schedule, ScheduledTask } from "node-cron"
 
 import { getExchangesConfig, supportedCurrencies } from "@config"
 
-import { refreshRealtimeData } from "./refresh-realtime-data"
 import { baseLogger } from "@services/logger"
+
+import { refreshRealtimeData } from "./refresh-realtime-data"
 
 export const startWatchers = async (
   callback?: RefreshDataCallback,
 ): Promise<ScheduledTask[]> => {
   const exchanges = getExchangesConfig()
-  baseLogger.info(exchanges, "Exchanges" )
+  baseLogger.info(exchanges, "Exchanges")
   baseLogger.info(supportedCurrencies, "Supported Currencies")
   const start: Promise<ScheduledTask>[] = []
 

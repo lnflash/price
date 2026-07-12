@@ -14,6 +14,8 @@ import { ConfigSchema, configSchema } from "./schema"
 
 const defaultContent = fs.readFileSync("./default.yaml", "utf8")
 export const defaultConfig = yaml.load(defaultContent)
+export const getCustomConfigPath = () =>
+  process.env.YAML_CONFIG_PATH || "/var/yaml/custom.yaml"
 
 const merge = (defaultConfig: unknown, customConfig: unknown) =>
   mergeWith(defaultConfig, customConfig, (a, b) => (Array.isArray(b) ? b : undefined))
@@ -21,7 +23,7 @@ const merge = (defaultConfig: unknown, customConfig: unknown) =>
 let customConfig
 
 try {
-  const customContent = fs.readFileSync("/var/yaml/custom.yaml", "utf8")
+  const customContent = fs.readFileSync(getCustomConfigPath(), "utf8")
   customConfig = yaml.load(customContent)
 } catch (err) {
   baseLogger.debug({ err }, "no custom.yaml available. using default values")

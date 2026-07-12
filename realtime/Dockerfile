@@ -6,12 +6,12 @@ WORKDIR /app
 COPY ./*.json ./yarn.lock ./
 COPY ./realtime ./realtime/
 
-RUN yarn install 
+RUN yarn install --frozen-lockfile
 RUN yarn workspace realtime build
 
 RUN rm -rf /app/node_modules
 RUN rm -rf /app/realtime/node_modules
-RUN yarn install --production
+RUN yarn install --frozen-lockfile --production
 
 FROM node:20-alpine
 COPY --from=build_image /app/realtime/dist /app

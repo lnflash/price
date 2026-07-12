@@ -7,3 +7,5 @@ files.extend-exclude = [
 [default.extend-words]
 # returned from twilio API referenced in src/debug/text-sms.ts
 Ons = "Ons"
+# Surinamese dollar symbol from IBEX currency metadata.
+Sur = "Sur"

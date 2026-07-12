@@ -11,10 +11,10 @@ import {
   Span as OriginalSpan,
 } from "@opentelemetry/api"
 import {
-  SemanticAttributes,
-  SemanticResourceAttributes,
+  ATTR_CODE_FUNCTION_NAME,
+  ATTR_SERVICE_NAME,
 } from "@opentelemetry/semantic-conventions"
-import { Resource } from "@opentelemetry/resources"
+import { defaultResource, resourceFromAttributes } from "@opentelemetry/resources"
 import { W3CTraceContextPropagator } from "@opentelemetry/core"
 import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node"
 import { HttpInstrumentation } from "@opentelemetry/instrumentation-http"
@@ -32,23 +32,23 @@ type ExtendedException = Exclude<Exception, string> & {
   level?: ErrorLevel
 }
 
+const SemanticAttributes = {
+  CODE_FUNCTION: ATTR_CODE_FUNCTION_NAME,
+  CODE_NAMESPACE: "code.namespace",
+} as const
+const SemanticResourceAttributes = {
+  SERVICE_NAME: ATTR_SERVICE_NAME,
+} as const
+
 propagation.setGlobalPropagator(new W3CTraceContextPropagator())
 
 registerInstrumentations({
   instrumentations: [
     new HttpInstrumentation({
-      ignoreIncomingPaths: ["/healthz"],
+      ignoreIncomingRequestHook: (request) => request.url === "/healthz",
     }),
     new GrpcInstrumentation(),
   ],
-})
-
-const provider = new NodeTracerProvider({
-  resource: Resource.default().merge(
-    new Resource({
-      [SemanticResourceAttributes.SERVICE_NAME]: tracingConfig.otelServiceName,
-    }),
-  ),
 })
 
 class SpanProcessorWrapper extends SimpleSpanProcessor {
@@ -77,7 +77,14 @@ class SpanProcessorWrapper extends SimpleSpanProcessor {
   }
 }
 
-provider.addSpanProcessor(new SpanProcessorWrapper(new OTLPTraceExporter()))
+const provider = new NodeTracerProvider({
+  resource: defaultResource().merge(
+    resourceFromAttributes({
+      [SemanticResourceAttributes.SERVICE_NAME]: tracingConfig.otelServiceName,
+    }),
+  ),
+  spanProcessors: [new SpanProcessorWrapper(new OTLPTraceExporter())],
+})
 
 provider.register()
 

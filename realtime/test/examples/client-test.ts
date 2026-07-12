@@ -24,7 +24,7 @@ function fetchPrices(err, data) {
     return
   }
   logger.info(data.currencies, "currencies")
-  data.currencies.forEach(c => {
+  data.currencies.forEach((c) => {
     console.log(c.code)
     client.getPrice({ currency: c.code }, printResp)
   })
