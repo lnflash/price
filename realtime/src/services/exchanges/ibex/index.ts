@@ -134,7 +134,8 @@ const tickerFromRaw = ({
   return new InvalidTickerError()
 }
 
-const getIbexId = (name: string) => ibexCurrencies.find((el) => el.name === name)?.id
+export const getIbexId = (name: string) =>
+  ibexCurrencies.find((el) => el.name === name)?.id
 // prettier-ignore
 const ibexCurrencies = [
       {
