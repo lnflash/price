@@ -28,6 +28,12 @@ exchanges:
       # expires after this many seconds so the pair is re-probed — IBEX adding
       # a currency should not need a pod restart to take effect.
       unsupportedTtlSeconds: 3600
+      # Cap on the Swap Rates probe (GET /rates). This is the value
+      # `createIbexSwap` already defaults to — spelled out so both timeout
+      # knobs are visible side by side. An unusable value (a YAML `10s`, an
+      # empty string, 0) falls back to this default and logs a warn rather
+      # than silently leaving the call uncapped.
+      timeout: 5000
       # `timeout` above caps the Swap Rates probe ONLY. The legacy fallback leg
       # has its own knob, because Rates v2 is capped far looser than GET /rates
       # (see IBEX_RATES_V2_DEFAULT_TIMEOUT_MS in

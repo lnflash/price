@@ -8,7 +8,7 @@ import { ExchangeRatesAPIExchangeService } from "./exchange-rates-api"
 import { FreeCurrencyRatesExchangeService } from "./free-currency-rates"
 import { MockedExchangeService } from "./mocked"
 import { IBEX_RATES_V2_DEFAULT_TIMEOUT_MS, IbexExchangeService } from "./ibex"
-import { IbexSwapExchangeService } from "./ibex-swap"
+import { DEFAULT_SWAP_RATES_TIMEOUT_MS, IbexSwapExchangeService } from "./ibex-swap"
 
 const exchanges: { [key: string]: IExchangeService } = {}
 
@@ -152,7 +152,9 @@ const createIbex = async (config: ExchangeConfig) => {
 
 const createIbexSwap = async (config: ExchangeConfig) => {
   const { base, quote } = config
-  const defaultConfig = { timeout: 5000 }
+  // The provider falls back to the same constant when this is missing or
+  // unusable, so the two cannot drift.
+  const defaultConfig = { timeout: DEFAULT_SWAP_RATES_TIMEOUT_MS }
   return IbexSwapExchangeService({
     base: base,
     quote: quote,

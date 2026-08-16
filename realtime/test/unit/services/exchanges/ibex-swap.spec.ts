@@ -10,7 +10,10 @@ import { CacheKeys } from "@domain/cache"
 
 import * as LocalCacheServiceImpl from "@services/cache"
 import { baseLogger } from "@services/logger"
-import { IbexSwapExchangeService } from "@services/exchanges/ibex-swap"
+import {
+  DEFAULT_SWAP_RATES_TIMEOUT_MS,
+  IbexSwapExchangeService,
+} from "@services/exchanges/ibex-swap"
 import * as IbexImpl from "@services/exchanges/ibex"
 
 // Live sandbox response for GET /rates?from=2&to=3 (BTC→USD). BOTH fields are
@@ -29,6 +32,28 @@ const mockAxiosResponse = {
 }
 
 jest.mock("axios")
+
+// The legacy-fallback counter is memoised on first use inside the provider
+// (module scope), so it survives `clearAllMocks` — hence a single `add` spy
+// reached lazily rather than a fresh counter per test, and a plain array for
+// the instrument names, which nothing clears.
+const mockCounterAdd = jest.fn()
+const mockCreatedCounterNames: string[] = []
+jest.mock("@opentelemetry/api", () => {
+  const actual = jest.requireActual("@opentelemetry/api")
+  return {
+    ...actual,
+    metrics: {
+      ...actual.metrics,
+      getMeter: () => ({
+        createCounter: (name: string) => {
+          mockCreatedCounterNames.push(name)
+          return { add: (...args: unknown[]) => mockCounterAdd(...args) }
+        },
+      }),
+    },
+  }
+})
 
 jest.mock("ibex-client", () => {
   // minimal stand-in for IbexAuthentication.withAuth: unwraps `.data`,
@@ -141,6 +166,112 @@ describe("IbexSwapExchangeService", () => {
       ask: toPrice(64870.7251),
       timestamp: toTimestamp(expect.any(Number)),
     })
+  })
+
+  // Same failure mode as `../ibex`, and worse here: a helm values `timeout: 10s`
+  // parses to NaN, axios reads `timeout` with a plain truthiness check
+  // (`if (own('timeout'))`), and NaN installs no cap at all. This probe runs
+  // inside the provider's *module-scoped* mutex, so one uncapped hung request
+  // parks the ticker of every pair this provider serves for undici's ~300s.
+  it.each([
+    ["a non-numeric string", "10s"],
+    ["an empty string", ""],
+    ["zero", 0],
+    ["a negative number", -1],
+  ])(
+    "still caps the Swap Rates probe when the configured timeout is %s",
+    async (_label: string, value: string | number) => {
+      ;(axios.get as jest.Mock).mockResolvedValue(mockAxiosResponse)
+      const warn = jest.spyOn(baseLogger, "warn").mockImplementation(() => undefined)
+
+      const service = await IbexSwapExchangeService({
+        base: "BTC",
+        quote: "USD",
+        config: { cacheSeconds: 300, timeout: value },
+      })
+      if (service instanceof Error) throw service
+
+      await service.fetchTicker()
+      expect(axios.get).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ timeout: DEFAULT_SWAP_RATES_TIMEOUT_MS }),
+      )
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          configuredTimeout: value,
+          timeout: DEFAULT_SWAP_RATES_TIMEOUT_MS,
+        }),
+        expect.stringContaining("unusable `timeout`"),
+      )
+    },
+  )
+
+  it("releases the shared mutex when a probe outlives the configured timeout", async () => {
+    // `timeout` is handed to axios, which bounds GET /rates — but withAuth runs
+    // an OAuth token request first, and that is a bare global `fetch` with no
+    // signal (ibex-client/dist/authentication/index.js:28). `mutex` is
+    // module-scoped, so an unbounded hold parks the ticker of every pair this
+    // provider serves for undici's ~300s.
+    const warn = jest.spyOn(baseLogger, "warn").mockImplementation(() => undefined)
+    ;(axios.get as jest.Mock).mockImplementation(
+      async (_url: string, opts: { params: { to: number } }) =>
+        opts.params.to === 28 // JMD — stands in for a parked auth call
+          ? new Promise(() => undefined)
+          : mockAxiosResponse,
+    )
+
+    const jmd = await IbexSwapExchangeService({
+      base: "BTC",
+      quote: "JMD",
+      config: { timeout: 50 },
+    })
+    const usd = await IbexSwapExchangeService({
+      base: "BTC",
+      quote: "USD",
+      config: { timeout: 50 },
+    })
+    if (jmd instanceof Error) throw jmd
+    if (usd instanceof Error) throw usd
+
+    const jmdInFlight = jmd.fetchTicker() // takes the lock and parks
+    const usdInFlight = usd.fetchTicker() // queued behind it
+
+    const blocked = Symbol("blocked")
+    const usdResult = await Promise.race([
+      usdInFlight,
+      new Promise((resolve) => setTimeout(() => resolve(blocked), 2000)),
+    ])
+    expect(usdResult).not.toBe(blocked)
+    expect(usdResult).toEqual({
+      bid: toPrice(63968.8481),
+      ask: toPrice(64870.7251),
+      timestamp: toTimestamp(expect.any(Number)),
+    })
+
+    await expect(jmdInFlight).resolves.toBeInstanceOf(UnknownExchangeServiceError)
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ base: "BTC", quote: "JMD", timeout: 50 }),
+      expect.stringContaining("releasing the shared lock"),
+    )
+  })
+
+  it("uses the configured Swap Rates timeout when it is usable, without warning", async () => {
+    ;(axios.get as jest.Mock).mockResolvedValue(mockAxiosResponse)
+    const warn = jest.spyOn(baseLogger, "warn").mockImplementation(() => undefined)
+
+    const service = await IbexSwapExchangeService({
+      base: "BTC",
+      quote: "USD",
+      config: { cacheSeconds: 300, timeout: 7000 },
+    })
+    if (service instanceof Error) throw service
+
+    await service.fetchTicker()
+    expect(axios.get).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ timeout: 7000 }),
+    )
+    expect(warn).not.toHaveBeenCalled()
   })
 
   it("should keep bid <= ask regardless of which side is larger", async () => {
@@ -622,6 +753,96 @@ describe("IbexSwapExchangeService", () => {
         expect.objectContaining({ base: "BTC", quote: "JMD", fallback: false }),
         expect.stringContaining("back on executable Swap Rates"),
       )
+    })
+
+    it("counts every legacy serve, not once per episode", async () => {
+      // `refreshRealtimeData` files both legs under exchangeName "IbexSwap", so
+      // `ibex_swap_legacy_fallback_total` is the only downstream signal that
+      // the home market was priced off mid-market rates. It has to be a
+      // per-serve counter: sitting it above the log-throttling `return` would
+      // turn it into one increment per *episode* — a ~240x under-count at a 15s
+      // tick against a 1h TTL — with this suite still green.
+      mockStatefulLocalCache()
+      ;(axios.get as jest.Mock).mockResolvedValue(unsupported)
+      jest
+        .spyOn(IbexImpl, "IbexExchangeService")
+        .mockResolvedValue({ fetchTicker: jest.fn(async () => legacyTicker) })
+
+      const service = await IbexSwapExchangeService({
+        base: "BTC",
+        quote: "JMD",
+        config: { cacheSeconds: 300 },
+      })
+      if (service instanceof Error) throw service
+
+      await service.fetchTicker()
+      await service.fetchTicker()
+      await service.fetchTicker()
+
+      expect(mockCreatedCounterNames).toContain("ibex_swap_legacy_fallback_total")
+      expect(mockCounterAdd).toHaveBeenCalledTimes(3)
+      expect(mockCounterAdd).toHaveBeenCalledWith(1, {
+        base: "BTC",
+        quote: "JMD",
+        reason: "pair-unsupported",
+      })
+    })
+
+    it("carries the re-probe reason on the counter, not just the log", async () => {
+      const { store } = mockStatefulLocalCache()
+      ;(axios.get as jest.Mock).mockResolvedValue(unsupported)
+      jest
+        .spyOn(IbexImpl, "IbexExchangeService")
+        .mockResolvedValue({ fetchTicker: jest.fn(async () => legacyTicker) })
+
+      const service = await IbexSwapExchangeService({
+        base: "BTC",
+        quote: "HTG",
+        config: { cacheSeconds: 300 },
+      })
+      if (service instanceof Error) throw service
+
+      await service.fetchTicker()
+      store.delete(`${CacheKeys.CurrentTicker}:IbexSwap:BTC:HTG:unsupported`)
+      ;(axios.get as jest.Mock).mockResolvedValue({ data: {}, status: 500 })
+      await service.fetchTicker()
+
+      expect(mockCounterAdd).toHaveBeenCalledTimes(2)
+      expect(mockCounterAdd).toHaveBeenNthCalledWith(1, 1, {
+        base: "BTC",
+        quote: "HTG",
+        reason: "pair-unsupported",
+      })
+      expect(mockCounterAdd).toHaveBeenNthCalledWith(2, 1, {
+        base: "BTC",
+        quote: "HTG",
+        reason: "probe-failed",
+      })
+    })
+
+    it("does not count a serve when the legacy leg is down too", async () => {
+      // The counter's own description promises *tickers served*. Counting the
+      // attempt instead climbed it once per tick through a both-legs-down
+      // episode, during which nothing was priced at all — over-reporting the
+      // mid-market signal by exactly the outage.
+      mockStatefulLocalCache()
+      ;(axios.get as jest.Mock).mockResolvedValue(unsupported)
+      jest
+        .spyOn(IbexImpl, "IbexExchangeService")
+        .mockResolvedValue(new ExchangeServiceError("legacy unavailable"))
+
+      const service = await IbexSwapExchangeService({
+        base: "BTC",
+        quote: "JMD",
+        config: { cacheSeconds: 300 },
+      })
+      if (service instanceof Error) throw service
+
+      await service.fetchTicker()
+      await service.fetchTicker()
+      await service.fetchTicker()
+
+      expect(mockCounterAdd).not.toHaveBeenCalled()
     })
 
     it("distinguishes a failed re-probe from an unsupported pair in the logs", async () => {

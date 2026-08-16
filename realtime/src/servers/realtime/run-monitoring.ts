@@ -27,18 +27,18 @@ const exporter = new PrometheusExporter(
   },
 )
 
-startServer()
-
 const meterProvider = new MeterProvider({
   readers: [exporter],
 })
 
-// Register globally so instruments created deeper in the tree — e.g. the
-// ibex-swap provider's legacy-fallback counter — are exported too, instead of
-// binding to the no-op provider. `metrics.getMeter` resolves the provider
-// installed at call time, and every such call happens on a cron tick, i.e.
-// after this module body has run.
+// Register globally before anything that can create an instrument. Instruments
+// deeper in the tree — e.g. the ibex-swap provider's legacy-fallback counter —
+// resolve a provider once, on first use, and keep it: a single `getMeter` call
+// ahead of this line would bind that counter to the no-op provider for the
+// life of the process, and it would silently never reach the scrape endpoint.
 metrics.setGlobalMeterProvider(meterProvider)
+
+startServer()
 
 const meter = meterProvider.getMeter("prices-prometheus")
 

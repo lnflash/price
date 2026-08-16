@@ -35,8 +35,16 @@ exchanges:
     # its abort controller only when one is configured — so Rates v2 has been
     # running with no client-side cap at all (undici's ~300s defaults, doubled
     # by withAuth's single 401 retry), not the sdk's documented 30s. 30000 is
-    # therefore the first bound this call has ever had; tighten it once Rates
-    # v2's latency distribution is measured.
+    # therefore the first bound the Rates v2 *request* has ever had; tighten it
+    # once that call's latency distribution is measured.
+    #
+    # Scope, precisely: this value reaches the Rates v2 request. The OAuth
+    # token request withAuth performs first is a bare global `fetch` with no
+    # signal (ibex-client/dist/authentication/index.js:28) and is NOT bounded
+    # by it. The provider therefore also races the whole ticker fetch against
+    # this same number inside its shared mutex, so a stalled auth host cannot
+    # park every pair — see IBEX_RATES_V2_DEFAULT_TIMEOUT_MS in
+    # src/services/exchanges/ibex.
     timeout: 30000
 - name: "free-currency-rates-usd"
   enabled: true

@@ -1,4 +1,8 @@
-import { InvalidExchangeConfigError } from "@domain/exchanges"
+import {
+  InvalidExchangeConfigError,
+  UnknownExchangeServiceError,
+} from "@domain/exchanges"
+import { toPrice, toTimestamp } from "@domain/primitives"
 import { defaultConfig, IBEX } from "@config"
 import { baseLogger } from "@services/logger"
 import { ExchangeFactory } from "@services/exchanges"
@@ -8,14 +12,16 @@ import {
 } from "@services/exchanges/ibex"
 
 const sdkConfig = jest.fn()
+const sdkGetRate = jest.fn()
 
 jest.mock("ibex-client", () => ({
   __esModule: true,
   default: jest.fn().mockImplementation(() => ({
     // the generated api-sdk instance; `.config({ timeout })` overrides its
-    // 30s default fetch timeout
+    // 30s default fetch timeout — for the Rates v2 request only, never for
+    // the OAuth token request withAuth runs first
     ibex: { config: sdkConfig },
-    getRate: jest.fn(),
+    getRate: sdkGetRate,
     authentication: {
       withAuth: jest.fn(),
       storage: { getAccessToken: jest.fn(async () => "test-token") },
@@ -39,6 +45,10 @@ jest.mock("@config", () => ({
 describe("IbexExchangeService", () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    // `clearAllMocks` wipes call records but keeps implementations, and the sdk
+    // stand-in is module-scoped — so an implementation set by one test would
+    // otherwise leak into every test after it.
+    sdkGetRate.mockReset()
   })
 
   afterEach(() => {
@@ -151,6 +161,58 @@ describe("IbexExchangeService", () => {
     if (ibex === undefined) throw new Error("no ibex exchange in default.yaml")
 
     expect(ibex.config.timeout).toBe(IBEX_RATES_V2_DEFAULT_TIMEOUT_MS)
+  })
+
+  // `Ibex.ibex.config({ timeout })` bounds the Rates v2 *request* only. The
+  // OAuth token request `withAuth` performs first is a bare global `fetch` with
+  // no signal and no relation to the sdk core
+  // (ibex-client/dist/authentication/index.js:28), so on a cold token cache or
+  // an expiry refresh a stalled `auth.hub.poweredbyibex.io` hangs on undici's
+  // ~300s defaults. This provider's mutex is module-scoped — one lock for every
+  // base/quote pair — and `ibex-swap` routes its legacy leg through here, so an
+  // unbounded hold stalls the ticker of every pair either provider serves.
+  it("releases the shared mutex when a call outlives the configured timeout", async () => {
+    const warn = jest.spyOn(baseLogger, "warn").mockImplementation(() => undefined)
+    sdkGetRate.mockImplementation(
+      async ({ secondary_currency_id }: { secondary_currency_id: number }) =>
+        secondary_currency_id === 28 // JMD — stands in for a parked auth call
+          ? new Promise(() => undefined)
+          : { rate: 64000, updatedAtUnix: 1_700_000_000_000 },
+    )
+
+    const jmd = await IbexExchangeService({
+      base: "BTC",
+      quote: "JMD",
+      config: { timeout: 50 },
+    })
+    const usd = await IbexExchangeService({
+      base: "BTC",
+      quote: "USD",
+      config: { timeout: 50 },
+    })
+    if (jmd instanceof Error) throw jmd
+    if (usd instanceof Error) throw usd
+
+    const jmdInFlight = jmd.fetchTicker() // takes the lock and parks
+    const usdInFlight = usd.fetchTicker() // queued behind it
+
+    const blocked = Symbol("blocked")
+    const usdResult = await Promise.race([
+      usdInFlight,
+      new Promise((resolve) => setTimeout(() => resolve(blocked), 2000)),
+    ])
+    expect(usdResult).not.toBe(blocked)
+    expect(usdResult).toEqual({
+      bid: toPrice(64000),
+      ask: toPrice(64000),
+      timestamp: toTimestamp(1_700_000_000_000),
+    })
+
+    await expect(jmdInFlight).resolves.toBeInstanceOf(UnknownExchangeServiceError)
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ base: "BTC", quote: "JMD", timeout: 50 }),
+      expect.stringContaining("releasing the shared lock"),
+    )
   })
 
   it("returns InvalidExchangeConfigError without credentials", async () => {
