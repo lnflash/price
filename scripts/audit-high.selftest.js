@@ -31,20 +31,38 @@ const TODAY = "2026-08-16"
 const summary = { critical: 0, high: 1, moderate: 0, low: 0 }
 const cleanSummary = { critical: 0, high: 0, moderate: 0, low: 0 }
 
-const advisory = ({ id, module: mod = "some-pkg", severity = "high" }) => {
-  const advisories = new Map()
-  collectAdvisory(advisories, {
-    advisory: {
-      github_advisory_id: id,
-      module_name: mod,
-      severity,
-      title: `${severity} issue in ${mod}`,
-      patched_versions: ">=1.0.0",
-    },
-    resolution: { path: `realtime>${mod}` },
-  })
-  return advisories
-}
+/**
+ * One yarn `auditAdvisory` payload. `numericId` populates yarn's own numeric
+ * `id` field, which is what collectAdvisory keys on when an advisory carries no
+ * GHSA slug.
+ */
+const advisoryData = ({
+  id,
+  numericId,
+  module: mod = "some-pkg",
+  severity = "high",
+  path = `realtime>${mod}`,
+}) => ({
+  advisory: {
+    github_advisory_id: id,
+    id: numericId,
+    module_name: mod,
+    severity,
+    title: `${severity} issue in ${mod}`,
+    patched_versions: ">=1.0.0",
+  },
+  resolution: { path },
+})
+
+const advisory = (over) => collectAdvisory(new Map(), advisoryData(over))
+
+/** The advisory map the shipped WAIVERS are written against: one path each. */
+const waivedAdvisories = () =>
+  WAIVERS.reduce(
+    (advisories, w) =>
+      collectAdvisory(advisories, advisoryData({ id: w.id, module: w.module })),
+    new Map(),
+  )
 
 const waiver = (over = {}) => ({
   id: "GHSA-waived-0001",
@@ -62,20 +80,8 @@ const runGate = (input) =>
     encoding: "utf8",
   })
 
-const advisoryEvent = ({ id, module: mod = "some-pkg", severity = "high" }) =>
-  JSON.stringify({
-    type: "auditAdvisory",
-    data: {
-      advisory: {
-        github_advisory_id: id,
-        module_name: mod,
-        severity,
-        title: `${severity} issue in ${mod}`,
-        patched_versions: ">=1.0.0",
-      },
-      resolution: { path: `realtime>${mod}` },
-    },
-  })
+const advisoryEvent = (over) =>
+  JSON.stringify({ type: "auditAdvisory", data: advisoryData(over) })
 
 const summaryEvent = (counts = {}) =>
   JSON.stringify({
@@ -173,6 +179,56 @@ test("a summary with critical paths but no advisories parsed fails, not passes",
   assert.match(failures[0], /yarn reported 20 critical\/high path\(s\)/)
 })
 
+test("a summary reporting more blocking paths than were parsed fails, not passes", () => {
+  // Partial blindness, which a zero/non-zero test cannot see: the two shipped
+  // waivers parse fine while the rest of the output vanishes. Every parsed
+  // advisory is legitimately waived, so nothing else here fails — without the
+  // path-count comparison this is a green gate with 15 unaccounted-for high
+  // paths behind it.
+  const { failures } = evaluate({
+    advisories: waivedAdvisories(),
+    summary: { critical: 0, high: 17, moderate: 0, low: 0 },
+    waivers: WAIVERS,
+    today: TODAY,
+  })
+  assert.strictEqual(failures.length, 1)
+  assert.match(failures[0], /yarn reported 17 critical\/high path\(s\) but only 2/)
+})
+
+/** One advisory yarn reached by two dependency paths — two auditAdvisory events. */
+const multiPathAdvisory = () =>
+  collectAdvisory(
+    advisory({ id: "GHSA-waived-0001" }),
+    advisoryData({ id: "GHSA-waived-0001", path: "history>some-pkg" }),
+  )
+
+test("one advisory reached by several paths reconciles against the path count", () => {
+  // The reconciliation counts paths, not advisories, because that is the unit
+  // yarn's summary counts in: two paths into one package are two summary paths
+  // and one deduped advisory. Comparing advisory counts would turn this — an
+  // entirely normal audit — red.
+  const { failures } = evaluate({
+    advisories: multiPathAdvisory(),
+    summary: { critical: 0, high: 2, moderate: 0, low: 0 },
+    waivers: [waiver()],
+    today: TODAY,
+  })
+  assert.deepStrictEqual(failures, [])
+})
+
+test("more parsed paths than the summary reports does not fail", () => {
+  // The comparison is one-directional on purpose: an over-count is not the
+  // silent green this check exists for, and must never turn the gate red on
+  // its own.
+  const { failures } = evaluate({
+    advisories: multiPathAdvisory(),
+    summary: { critical: 0, high: 1, moderate: 0, low: 0 },
+    waivers: [waiver()],
+    today: TODAY,
+  })
+  assert.deepStrictEqual(failures, [])
+})
+
 test("waivers are keyed by advisory id, not module name", () => {
   // A second advisory against an already-waived package must still block.
   const advisories = advisory({ id: "GHSA-waived-0001" })
@@ -195,6 +251,58 @@ test("waivers are keyed by advisory id, not module name", () => {
   })
   assert.strictEqual(failures.length, 1)
   assert.match(failures[0], /GHSA-new-0002/)
+})
+
+test("an advisory with no GHSA slug is keyed by yarn's numeric advisory id", () => {
+  // The fallback in collectAdvisory. Keying on anything package-shaped instead
+  // — the module name being the obvious slip — would silently turn every
+  // waiver into a blanket waiver for its package, which is the property the
+  // case below defends.
+  const advisories = advisory({ numericId: 1234 })
+  assert.deepStrictEqual([...advisories.keys()], ["1234"])
+})
+
+test("a numeric-keyed advisory cannot be waived by its module name", () => {
+  const { failures, waived } = evaluate({
+    advisories: advisory({ numericId: 1234 }),
+    summary,
+    waivers: [waiver({ id: "some-pkg" })],
+    today: TODAY,
+  })
+  assert.strictEqual(waived.length, 0)
+  assert.ok(
+    failures.some((f) => /HIGH some-pkg \(1234\)/.test(f)),
+    `expected the advisory to still block, got: ${JSON.stringify(failures)}`,
+  )
+})
+
+test("a waiver whose module does not match the advisory fails", () => {
+  // Copy a waiver to cover a new advisory, change the id, forget the module:
+  // the gate must not accept a risk while describing it as something else.
+  const { failures, waived } = evaluate({
+    advisories: advisory({ id: "GHSA-waived-0001", module: "other-pkg" }),
+    summary,
+    waivers: [waiver()], // claims module "some-pkg"
+    today: TODAY,
+  })
+  assert.strictEqual(waived.length, 0)
+  assert.strictEqual(failures.length, 1)
+  assert.match(
+    failures[0],
+    /Waiver GHSA-waived-0001 claims module some-pkg but the advisory is against other-pkg/,
+  )
+})
+
+test("an expired waiver's failure names the advisory's module, not the waiver's claim", () => {
+  const { failures } = evaluate({
+    advisories: advisory({ id: "GHSA-waived-0001", module: "other-pkg" }),
+    summary,
+    waivers: [waiver({ reviewBy: "2026-08-15" })], // claims module "some-pkg"
+    today: TODAY,
+  })
+  const expiry = failures.find((f) => /expired on/.test(f))
+  assert.ok(expiry, `expected an expiry failure, got: ${JSON.stringify(failures)}`)
+  assert.match(expiry, /Waiver for GHSA-waived-0001 \(other-pkg\)/)
 })
 
 test("moderate and low advisories do not block", () => {
@@ -282,6 +390,17 @@ test("e2e: a summary with no advisories parsed exits 1, not 0", () => {
   const { status, stderr } = runGate(summaryEvent({ critical: 3, high: 17 }))
   assert.strictEqual(status, 1, `expected exit 1, got ${status}\n${stderr}`)
   assert.match(stderr, /Refusing to report this as clean/)
+})
+
+test("e2e: a summary with only some advisories parsed exits 1, not 0", () => {
+  // The partial version of the same regression, and the one that gets past a
+  // zero/non-zero check: the shipped waivers parse, the other 15 high paths
+  // do not, and everything that did parse is legitimately waived.
+  const { status, stderr } = runGate(
+    [...waivedAdvisoryEvents(), summaryEvent({ high: 17 })].join("\n"),
+  )
+  assert.strictEqual(status, 1, `expected exit 1, got ${status}\n${stderr}`)
+  assert.match(stderr, /but only 2 were parsed into advisories/)
 })
 
 let failed = 0

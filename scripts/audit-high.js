@@ -18,9 +18,14 @@ const readline = require("node:readline")
  *     quietly outlive the dependency that needed them.
  *
  * The gate also reconciles the two independent halves of yarn's output: the
- * summary counts it prints against the advisories it decides on. A summary
- * reporting critical/high paths with no advisories parsed means the parser has
- * gone blind, and that fails rather than reporting clean.
+ * summary counts it prints against the advisories it decides on. yarn emits one
+ * `auditAdvisory` event per dependency path, so the blocking paths we parsed
+ * must account for every critical/high path the summary reports. Coming up
+ * short — whether by one path or by all of them — means the parser has gone
+ * blind to part of the output, and that fails rather than reporting clean.
+ *
+ * A waiver's `module` is checked against the advisory it waives, so the claim
+ * the security record makes about what is being accepted is the real one.
  *
  * The decision logic is exported so scripts/audit-high.selftest.js can prove
  * every one of those failure modes in CI. A gate nobody has watched fail is
@@ -77,10 +82,13 @@ const evaluate = ({ advisories, summary, waivers = WAIVERS, today }) => {
     // advisory it covers is gone, and two contradictory failures for one
     // waiver is worse guidance than none.
     if (expired.has(w.id) && advisories.has(w.id)) {
+      // The advisory is present in this branch, so name the module it is
+      // actually against rather than the waiver's unverified claim about it.
       failures.push(
-        `Waiver for ${w.id} (${w.module}) expired on ${w.reviewBy}. Re-check the ` +
-          `advisory: apply the fix if one now exists, or extend the waiver with a ` +
-          `fresh review date and a reason that still holds.`,
+        `Waiver for ${w.id} (${advisories.get(w.id).module}) expired on ` +
+          `${w.reviewBy}. Re-check the advisory: apply the fix if one now exists, ` +
+          `or extend the waiver with a fresh review date and a reason that still ` +
+          `holds.`,
       )
     }
   }
@@ -94,8 +102,24 @@ const evaluate = ({ advisories, summary, waivers = WAIVERS, today }) => {
     }
   }
 
+  const mismatched = new Set()
   for (const a of blocking) {
-    if (waiverById.has(a.id)) continue
+    const w = waiverById.get(a.id)
+    if (w) {
+      // The waiver's `module` is the human-readable half of the claim — it is
+      // what every message here and in the security record says is being
+      // accepted. Copy a waiver, change the id and forget the module and that
+      // claim becomes a lie, so verify it against the advisory rather than
+      // trusting it.
+      if (w.module !== a.module) {
+        mismatched.add(a.id)
+        failures.push(
+          `Waiver ${w.id} claims module ${w.module} but the advisory is against ` +
+            `${a.module} — fix the waiver.`,
+        )
+      }
+      continue
+    }
     failures.push(
       `${a.severity.toUpperCase()} ${a.module} (${a.id}): ${a.title}\n` +
         `    patched: ${a.patched}\n` +
@@ -104,20 +128,30 @@ const evaluate = ({ advisories, summary, waivers = WAIVERS, today }) => {
   }
 
   // The counts we print and the advisories we gate on come from two different
-  // yarn events. If they ever disagree — yarn says there are critical/high
-  // paths but we parsed no advisory to attribute them to — the parser has lost
-  // track of the audit output and every finding is invisible to the gate. That
-  // is a silent green, the one failure mode a security check must never have.
+  // yarn events. yarn emits one `auditAdvisory` per dependency path, so the
+  // blocking paths we parsed must cover every critical/high path the summary
+  // reports. Counting advisories instead of paths would only catch total
+  // blindness: a parser that drops all but one advisory still leaves the rest
+  // invisible to the gate, which is the same silent green in a smaller
+  // package. Compared with `<` rather than `!==`: parsing more paths than the
+  // summary reports is not the silent green this check exists for, and an
+  // audit gate that cries wolf gets ignored, so an over-count never false-reds.
   const reportedBlocking = (summary.critical || 0) + (summary.high || 0)
-  if (reportedBlocking > 0 && blocking.length === 0) {
+  const parsedBlockingPaths = blocking.reduce((n, a) => n + a.paths.size, 0)
+  if (parsedBlockingPaths < reportedBlocking) {
     failures.push(
-      `yarn reported ${reportedBlocking} critical/high path(s) but zero advisories ` +
-        `were parsed — the audit output format or the parser changed. Refusing to ` +
-        `report this as clean.`,
+      `yarn reported ${reportedBlocking} critical/high path(s) but only ` +
+        `${parsedBlockingPaths} were parsed into advisories — the audit output ` +
+        `format or the parser changed. Refusing to report this as clean.`,
     )
   }
 
-  const waived = blocking.filter((a) => waiverById.has(a.id) && !expired.has(a.id))
+  // A waiver only counts as waived once it has survived every check on it:
+  // in date, and honest about the module it covers. Otherwise the report would
+  // list an accepted risk on the same run that refuses to accept it.
+  const waived = blocking.filter(
+    (a) => waiverById.has(a.id) && !expired.has(a.id) && !mismatched.has(a.id),
+  )
   if (waived.length > 0) {
     lines.push(`\nWaived (${waived.length}), each re-checked by its review date:`)
     for (const a of waived) {
