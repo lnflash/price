@@ -17,13 +17,54 @@ import { IBEX } from "@config"
 import { AuthCache } from "./cache"
 
 const mutex = new Mutex()
+
+// The Rates v2 cap, shared by every caller that builds this provider:
+// `createIbex` in the exchange factory and the legacy fallback leg in
+// `../ibex-swap`. One constant so tightening it cannot leave a path behind —
+// the `default.yaml` Ibex entry mirrors it and says so, and a test asserts the
+// two match.
+//
+// Why not the 5000 every other provider defaults to: until now this provider
+// dropped `timeout` on the floor, and — contrary to the sdk's own JSDoc
+// ("Override the default `fetch` request timeout of 30 seconds") — `api`'s core
+// only installs an AbortController `if (this.config.timeout)`, which starts as
+// `{}` and which `ibex-client` never sets. So Rates v2 in prod today runs with
+// *no* client-side abort at all: bounded only by undici's ~300s defaults, and
+// doubled by withAuth's single 401 retry. The step this PR takes is therefore
+// unbounded -> bounded, not 30s -> something tighter, and anything below the
+// documented 30s could start aborting calls that today wait and succeed —
+// dropping JMD onto a mid-market FX provider, the exact regression this PR
+// exists to prevent. 30000 is the value the code was believed to enforce, so
+// the first rollout changes nothing observable. Measure Rates v2's latency
+// distribution on that rollout, then tighten with data in hand (a test pins
+// this number so the change is deliberate).
+export const IBEX_RATES_V2_DEFAULT_TIMEOUT_MS = 30000
+
+// Only reached when a caller builds this service with no `timeout` at all, or
+// with one that cannot be used (see below). Both real callers pass
+// IBEX_RATES_V2_DEFAULT_TIMEOUT_MS.
+const UNCONFIGURED_TIMEOUT_MS = 5000
+
 export const IbexExchangeService = async ({
   base,
   quote,
   config,
 }: IbexExchangeServiceArgs): Promise<IExchangeService | ExchangeServiceError> => {
   const cacheSeconds = config?.cacheSeconds || 180
-  const timeout = Number(config?.timeout || 5000)
+  // Fail *closed* on an unusable value. A YAML `timeout: 10s` — or anything
+  // else non-numeric a helm values file can hand through — parses to NaN, and
+  // the previous `if (timeout > 0)` guard turned that into "configure nothing",
+  // i.e. silently restored the uncapped pre-PR behaviour this change exists to
+  // remove, with nothing logged.
+  const configuredTimeout = Number(config?.timeout)
+  const timeoutIsUsable = Number.isFinite(configuredTimeout) && configuredTimeout > 0
+  const timeout = timeoutIsUsable ? configuredTimeout : UNCONFIGURED_TIMEOUT_MS
+  if (config?.timeout !== undefined && !timeoutIsUsable) {
+    baseLogger.warn(
+      { base, quote, configuredTimeout: config.timeout, timeout },
+      "Ibex: unusable `timeout` in exchange config, using the default cap instead",
+    )
+  }
 
   if (!IBEX.clientId || !IBEX.clientSecret) {
     return new InvalidExchangeConfigError("IBEX client credentials are required")
@@ -38,20 +79,18 @@ export const IbexExchangeService = async ({
     AuthCache,
   )
 
-  // The api-sdk under ibex-client defaults to a 30s fetch timeout, and withAuth
-  // retries once on 401 — so an unconfigured call can park for ~60s. The
-  // exchange factory has always passed a `timeout`; this provider ignored it
-  // until now. Honour it. This matters beyond this provider: `ibex-swap`
-  // serves the pairs Swap Rates does not support (JMD, HTG, CAD) through here,
-  // on the polling loop's 15s tick.
+  // The sdk installs its abort controller only when a timeout is configured,
+  // and nothing configured one — so every Rates v2 call has been uncapped,
+  // and withAuth's single 401 retry doubles that. The exchange factory has
+  // always passed a `timeout`; this provider ignored it until now. Honour it,
+  // unconditionally. This matters beyond this provider: `ibex-swap` serves the
+  // pairs Swap Rates does not support (JMD, HTG, CAD) through here, on the
+  // polling loop's 15s tick.
   //
   // Rollout note: this is a live behaviour change for the `ibex` provider,
-  // which prod still runs — it goes from the sdk's 30s to whatever is
-  // configured. `createIbex` therefore defaults to 10000 rather than the 5000
-  // every other provider uses, because Rates v2's latency distribution is not
-  // measured yet and a too-tight cap would error out calls that previously
-  // waited and succeeded. See the comment there before tightening it.
-  if (timeout > 0) Ibex.ibex.config({ timeout })
+  // which prod still runs — it goes from no client-side cap to whatever is
+  // configured. See IBEX_RATES_V2_DEFAULT_TIMEOUT_MS above before tightening.
+  Ibex.ibex.config({ timeout })
 
   const cacheKey = `${CacheKeys.CurrentTicker}:Ibex:${base}:${quote}`
   const cacheTtlSecs = Number(cacheSeconds)

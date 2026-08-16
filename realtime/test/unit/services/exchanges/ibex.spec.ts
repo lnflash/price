@@ -1,7 +1,11 @@
 import { InvalidExchangeConfigError } from "@domain/exchanges"
-import { IBEX } from "@config"
+import { defaultConfig, IBEX } from "@config"
+import { baseLogger } from "@services/logger"
 import { ExchangeFactory } from "@services/exchanges"
-import { IbexExchangeService } from "@services/exchanges/ibex"
+import {
+  IBEX_RATES_V2_DEFAULT_TIMEOUT_MS,
+  IbexExchangeService,
+} from "@services/exchanges/ibex"
 
 const sdkConfig = jest.fn()
 
@@ -43,9 +47,10 @@ describe("IbexExchangeService", () => {
 
   // The exchange factory has always passed a `timeout`
   // (services/exchanges/index.ts). Dropping it on the floor left every Rates v2
-  // call on the sdk's 30s default, doubled by withAuth's single retry — and
-  // `ibex-swap` routes the pairs Swap Rates cannot price (JMD, HTG, CAD)
-  // through here, on a 15s polling tick.
+  // call with no client-side abort at all — the sdk installs one only when a
+  // timeout is configured, and nothing configured it — doubled by withAuth's
+  // single retry. And `ibex-swap` routes the pairs Swap Rates cannot price
+  // (JMD, HTG, CAD) through here, on a 15s polling tick.
   it("caps the sdk fetch timeout at the configured timeout", async () => {
     const service = await IbexExchangeService({
       base: "BTC",
@@ -64,14 +69,63 @@ describe("IbexExchangeService", () => {
     expect(sdkConfig).toHaveBeenCalledWith({ timeout: 5000 })
   })
 
+  // A helm values file hands `timeout` through as whatever the operator typed.
+  // `timeout: 10s` parses to NaN, and the previous `if (timeout > 0)` guard
+  // turned that into "never call .config()" — i.e. it failed *open*, silently
+  // restoring the uncapped behaviour this change exists to remove.
+  it.each([
+    ["a non-numeric string", "10s"],
+    ["an empty string", ""],
+    ["zero", 0],
+    ["a negative number", -1],
+  ])(
+    "still caps the sdk when the configured timeout is %s",
+    async (_label: string, value: string | number) => {
+      const warn = jest.spyOn(baseLogger, "warn").mockImplementation(() => undefined)
+
+      const service = await IbexExchangeService({
+        base: "BTC",
+        quote: "JMD",
+        config: { timeout: value },
+      })
+      if (service instanceof Error) throw service
+
+      expect(sdkConfig).toHaveBeenCalledWith({ timeout: 5000 })
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({ configuredTimeout: value, timeout: 5000 }),
+        expect.stringContaining("unusable `timeout`"),
+      )
+    },
+  )
+
+  it("does not warn when the configured timeout is usable", async () => {
+    const warn = jest.spyOn(baseLogger, "warn").mockImplementation(() => undefined)
+
+    const service = await IbexExchangeService({
+      base: "BTC",
+      quote: "JMD",
+      config: { timeout: 7000 },
+    })
+    if (service instanceof Error) throw service
+
+    expect(sdkConfig).toHaveBeenCalledWith({ timeout: 7000 })
+    expect(warn).not.toHaveBeenCalled()
+  })
+
   // Rollout guard. Honouring `timeout` is a live behaviour change for a
-  // provider prod still runs: it goes from the sdk's 30s to whatever the
-  // factory hands it. So the factory deliberately does *not* hand it the 5000
-  // every other provider defaults to — tightening this before Rates v2's
-  // latency distribution is measured would start erroring calls that
-  // previously waited and succeeded, dropping JMD onto a mid-market FX
-  // provider. Change the number here and in `createIbex` together, with data.
-  it("defaults the ibex provider to a conservative timeout in the factory", async () => {
+  // provider prod still runs: it goes from *no* client-side cap (the sdk only
+  // installs an abort controller when one is configured, and ibex-client never
+  // configures one — the "30 seconds" is JSDoc the implementation does not
+  // honour) to whatever the factory hands it. So the factory deliberately does
+  // not hand it the 5000 every other provider defaults to: anything below the
+  // documented 30s could start erroring calls that today wait and succeed,
+  // dropping JMD onto a mid-market FX provider. Change this number with a
+  // measured latency distribution in hand, not before.
+  it("pins the Rates v2 default timeout so tightening it is deliberate", () => {
+    expect(IBEX_RATES_V2_DEFAULT_TIMEOUT_MS).toBe(30000)
+  })
+
+  it("defaults the ibex provider to the shared Rates v2 timeout in the factory", async () => {
     const service = await ExchangeFactory().create({
       provider: "ibex",
       name: "ibex-factory-timeout-default",
@@ -84,7 +138,19 @@ describe("IbexExchangeService", () => {
     })
     if (service instanceof Error) throw service
 
-    expect(sdkConfig).toHaveBeenCalledWith({ timeout: 10000 })
+    expect(sdkConfig).toHaveBeenCalledWith({ timeout: IBEX_RATES_V2_DEFAULT_TIMEOUT_MS })
+  })
+
+  // Third copy of the same number: deployments that replace the `exchanges`
+  // list wholesale take the shipped yaml's value, not `createIbex`'s. Without
+  // this, tightening the constant would leave the yaml behind and no test
+  // would notice.
+  it("keeps the shipped default.yaml Ibex timeout in step with the constant", () => {
+    const exchanges = (defaultConfig as { exchanges: ExchangeConfig[] }).exchanges
+    const ibex = exchanges.find((exchange) => exchange.provider === "ibex")
+    if (ibex === undefined) throw new Error("no ibex exchange in default.yaml")
+
+    expect(ibex.config.timeout).toBe(IBEX_RATES_V2_DEFAULT_TIMEOUT_MS)
   })
 
   it("returns InvalidExchangeConfigError without credentials", async () => {

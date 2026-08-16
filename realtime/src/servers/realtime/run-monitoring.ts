@@ -1,4 +1,5 @@
 import dotenv from "dotenv"
+import { metrics } from "@opentelemetry/api"
 import { MeterProvider } from "@opentelemetry/sdk-metrics"
 import { PrometheusExporter } from "@opentelemetry/exporter-prometheus"
 import { supportedCurrencies } from "@config"
@@ -31,6 +32,13 @@ startServer()
 const meterProvider = new MeterProvider({
   readers: [exporter],
 })
+
+// Register globally so instruments created deeper in the tree — e.g. the
+// ibex-swap provider's legacy-fallback counter — are exported too, instead of
+// binding to the no-op provider. `metrics.getMeter` resolves the provider
+// installed at call time, and every such call happens on a cron tick, i.e.
+// after this module body has run.
+metrics.setGlobalMeterProvider(meterProvider)
 
 const meter = meterProvider.getMeter("prices-prometheus")
 

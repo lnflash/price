@@ -9,6 +9,7 @@ import {
 import { CacheKeys } from "@domain/cache"
 
 import * as LocalCacheServiceImpl from "@services/cache"
+import { baseLogger } from "@services/logger"
 import { IbexSwapExchangeService } from "@services/exchanges/ibex-swap"
 import * as IbexImpl from "@services/exchanges/ibex"
 
@@ -338,14 +339,23 @@ describe("IbexSwapExchangeService", () => {
       timestamp: toTimestamp(1_700_000_000_000),
     }
 
-    const unsupportedKey = `${CacheKeys.CurrentTicker}:IbexSwap:BTC:JMD:unsupported`
-    const statusKey = `${CacheKeys.CurrentTicker}:IbexSwap:BTC:JMD:status`
+    const ratesKey = `${CacheKeys.CurrentTicker}:IbexSwap:BTC:JMD`
+    const unsupportedKey = `${ratesKey}:unsupported`
+    const statusKey = `${ratesKey}:status`
 
-    it("gives the legacy leg its own timeout instead of the probe's", async () => {
-      // createIbexSwap defaults `timeout` to 5s for GET /rates, but createIbex
-      // deliberately ships 10s for Rates v2 — forwarding this probe's config
-      // verbatim would run the JMD fallback, the whole point of this provider,
-      // at the tighter cap the legacy provider was explicitly kept away from.
+    const swapRatesTicker = {
+      bid: toPrice(63968.8481),
+      ask: toPrice(64870.7251),
+      timestamp: toTimestamp(expect.any(Number)),
+    }
+
+    it("gives the legacy leg the shared Rates v2 timeout, not the probe's", async () => {
+      // createIbexSwap defaults `timeout` to 5s for GET /rates, but Rates v2
+      // deliberately ships looser — forwarding this probe's config verbatim
+      // would run the JMD fallback, the whole point of this provider, at the
+      // tighter cap the legacy provider was explicitly kept away from. Asserted
+      // against the exported constant rather than a literal so this leg cannot
+      // drift out of step with `createIbex` when Rates v2 is tightened.
       ;(axios.get as jest.Mock).mockResolvedValue(unsupported)
       const legacyFactory = jest
         .spyOn(IbexImpl, "IbexExchangeService")
@@ -361,7 +371,9 @@ describe("IbexSwapExchangeService", () => {
 
       expect(legacyFactory).toHaveBeenCalledWith(
         expect.objectContaining({
-          config: expect.objectContaining({ timeout: 10000 }),
+          config: expect.objectContaining({
+            timeout: IbexImpl.IBEX_RATES_V2_DEFAULT_TIMEOUT_MS,
+          }),
         }),
       )
     })
@@ -516,6 +528,129 @@ describe("IbexSwapExchangeService", () => {
 
       expect(axios.get).toHaveBeenCalledTimes(1)
       expect(legacyFetchTicker).toHaveBeenCalledTimes(4)
+    })
+
+    it("stops treating the pair as fallen back once a probe succeeds", async () => {
+      // The flag that keeps a fallen-back pair on legacy rates when a probe
+      // fails must not outlive the condition it names. IBEX adds JMD to Swap
+      // Rates, the `:unsupported` entry ages out, the probe succeeds — from
+      // then on this is a normal Swap Rates pair, and the next transient 500
+      // has to surface as an error. Left set, the flag would instead serve a
+      // legacy MID-MARKET ticker (bid == ask) under the IbexSwap name, with no
+      // log, for the rest of the process's life — on a pair Swap Rates can
+      // price. That is the display-vs-settlement divergence this provider
+      // exists to close, reintroduced from the other side.
+      const { store } = mockStatefulLocalCache()
+      ;(axios.get as jest.Mock).mockResolvedValue(unsupported)
+      const legacyFetchTicker = jest.fn(async () => legacyTicker)
+      jest
+        .spyOn(IbexImpl, "IbexExchangeService")
+        .mockResolvedValue({ fetchTicker: legacyFetchTicker })
+
+      const service = await IbexSwapExchangeService({
+        base: "BTC",
+        quote: "JMD",
+        config: { cacheSeconds: 300 },
+      })
+      if (service instanceof Error) throw service
+
+      await expect(service.fetchTicker()).resolves.toEqual(legacyTicker)
+
+      // IBEX adds the pair: the flag ages out and the re-probe succeeds
+      store.delete(unsupportedKey)
+      ;(axios.get as jest.Mock).mockResolvedValue(mockAxiosResponse)
+      await expect(service.fetchTicker()).resolves.toEqual(swapRatesTicker)
+
+      // ...then the swap cache expires and the next probe hits one transient
+      // 500. The caller must see that error, not a legacy ticker.
+      store.delete(ratesKey)
+      ;(axios.get as jest.Mock).mockResolvedValue({ data: {}, status: 500 })
+
+      const result = await service.fetchTicker()
+      expect(result).toBeInstanceOf(UnknownExchangeServiceError)
+      expect(legacyFetchTicker).toHaveBeenCalledTimes(1) // the original fallback only
+    })
+
+    it("logs entering and leaving the fallback, once per episode", async () => {
+      // `refreshRealtimeData` records the price under exchangeName "IbexSwap"
+      // whichever leg produced it, so the logs are the only thing telling a
+      // responder that the home market is off executable rates. One `warn`
+      // level and one `fallback` field have to bound the whole episode —
+      // without repeating a line on every 15s tick.
+      const { store } = mockStatefulLocalCache()
+      const warn = jest.spyOn(baseLogger, "warn").mockImplementation(() => undefined)
+      const fallbackCalls = () =>
+        (warn.mock.calls as unknown as Array<[Record<string, unknown>, string]>).filter(
+          ([fields]) => fields?.fallback === true,
+        )
+      ;(axios.get as jest.Mock).mockResolvedValue(unsupported)
+      jest
+        .spyOn(IbexImpl, "IbexExchangeService")
+        .mockResolvedValue({ fetchTicker: jest.fn(async () => legacyTicker) })
+
+      const service = await IbexSwapExchangeService({
+        base: "BTC",
+        quote: "JMD",
+        config: { cacheSeconds: 300 },
+      })
+      if (service instanceof Error) throw service
+
+      await service.fetchTicker()
+      await service.fetchTicker()
+      await service.fetchTicker()
+
+      // the unsupported answer itself, plus the switch to serving legacy —
+      // then silence, not one line per tick
+      expect(fallbackCalls()).toHaveLength(2)
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          base: "BTC",
+          quote: "JMD",
+          fallback: true,
+          reason: "pair-unsupported",
+        }),
+        expect.any(String),
+      )
+
+      // and the recovery closes the episode under the same field
+      store.delete(unsupportedKey)
+      ;(axios.get as jest.Mock).mockResolvedValue(mockAxiosResponse)
+      await expect(service.fetchTicker()).resolves.toEqual(swapRatesTicker)
+
+      expect(fallbackCalls()).toHaveLength(2)
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({ base: "BTC", quote: "JMD", fallback: false }),
+        expect.stringContaining("back on executable Swap Rates"),
+      )
+    })
+
+    it("distinguishes a failed re-probe from an unsupported pair in the logs", async () => {
+      const { store } = mockStatefulLocalCache()
+      const warn = jest.spyOn(baseLogger, "warn").mockImplementation(() => undefined)
+      ;(axios.get as jest.Mock).mockResolvedValue(unsupported)
+      jest
+        .spyOn(IbexImpl, "IbexExchangeService")
+        .mockResolvedValue({ fetchTicker: jest.fn(async () => legacyTicker) })
+
+      const service = await IbexSwapExchangeService({
+        base: "BTC",
+        quote: "JMD",
+        config: { cacheSeconds: 300 },
+      })
+      if (service instanceof Error) throw service
+
+      await service.fetchTicker()
+
+      // the flag ages out and the re-probe fails: still legacy, but for a
+      // different reason — an incident rather than a standing condition
+      store.delete(unsupportedKey)
+      ;(axios.get as jest.Mock).mockResolvedValue({ data: {}, status: 500 })
+      await expect(service.fetchTicker()).resolves.toEqual(legacyTicker)
+
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({ fallback: true, reason: "probe-failed" }),
+        expect.any(String),
+      )
     })
 
     it("keeps serving the legacy provider even when the error backoff is cached", async () => {

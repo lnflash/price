@@ -26,13 +26,18 @@ exchanges:
   cron: "*/15 * * * * *"
   config:
     cacheSeconds: 180
-    # This provider ignored `timeout` until now and ran on the ibex-client
-    # sdk's 30s default (~60s worst case: withAuth retries once on 401). It
-    # now honours the value, so this is a live behaviour change — kept
-    # deliberately loose until Rates v2's latency distribution is measured.
-    # Same default lives in `createIbex` for deployments that replace this
-    # exchanges list wholesale.
-    timeout: 10000
+    # Mirrors IBEX_RATES_V2_DEFAULT_TIMEOUT_MS in
+    # src/services/exchanges/ibex — this copy exists for deployments that
+    # replace the exchanges list wholesale, and a unit test asserts the two
+    # match. Change them together.
+    #
+    # This provider ignored `timeout` until now, and the sdk under it installs
+    # its abort controller only when one is configured — so Rates v2 has been
+    # running with no client-side cap at all (undici's ~300s defaults, doubled
+    # by withAuth's single 401 retry), not the sdk's documented 30s. 30000 is
+    # therefore the first bound this call has ever had; tighten it once Rates
+    # v2's latency distribution is measured.
+    timeout: 30000
 - name: "free-currency-rates-usd"
   enabled: true
   quoteAlias: "*"
