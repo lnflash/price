@@ -17,6 +17,9 @@ jobs:
           node-version: 20
           cache: yarn
       - run: yarn install --frozen-lockfile
+      # Prove the gate can still fail before trusting it to pass (waiver
+      # expiry, unwaived highs, a missing summary). No deps beyond node.
+      - run: node scripts/audit-high.selftest.js
       - run: yarn audit:prod:high
 
   secret-scan:
