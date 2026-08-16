@@ -1,4 +1,5 @@
 import dotenv from "dotenv"
+import { metrics } from "@opentelemetry/api"
 import { MeterProvider } from "@opentelemetry/sdk-metrics"
 import { PrometheusExporter } from "@opentelemetry/exporter-prometheus"
 import { supportedCurrencies } from "@config"
@@ -26,11 +27,18 @@ const exporter = new PrometheusExporter(
   },
 )
 
-startServer()
-
 const meterProvider = new MeterProvider({
   readers: [exporter],
 })
+
+// Register globally before anything that can create an instrument. Instruments
+// deeper in the tree — e.g. the ibex-swap provider's legacy-fallback counter —
+// resolve a provider once, on first use, and keep it: a single `getMeter` call
+// ahead of this line would bind that counter to the no-op provider for the
+// life of the process, and it would silently never reach the scrape endpoint.
+metrics.setGlobalMeterProvider(meterProvider)
+
+startServer()
 
 const meter = meterProvider.getMeter("prices-prometheus")
 

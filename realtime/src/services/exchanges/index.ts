@@ -7,8 +7,8 @@ import { CurrencyBeaconExchangeService } from "./currencybeacon"
 import { ExchangeRatesAPIExchangeService } from "./exchange-rates-api"
 import { FreeCurrencyRatesExchangeService } from "./free-currency-rates"
 import { MockedExchangeService } from "./mocked"
-import { IbexExchangeService } from "./ibex"
-import { IbexSwapExchangeService } from "./ibex-swap"
+import { IBEX_RATES_V2_DEFAULT_TIMEOUT_MS, IbexExchangeService } from "./ibex"
+import { DEFAULT_SWAP_RATES_TIMEOUT_MS, IbexSwapExchangeService } from "./ibex-swap"
 
 const exchanges: { [key: string]: IExchangeService } = {}
 
@@ -135,7 +135,14 @@ const createYadio = async (config: ExchangeConfig) => {
 
 const createIbex = async (config: ExchangeConfig) => {
   const { base, quote } = config
-  const defaultConfig = { timeout: 5000 }
+  // Not the 5s every other provider defaults to: `IbexExchangeService` ignored
+  // `timeout` until now, so this provider — which is live in prod — has been
+  // running Rates v2 with no client-side cap at all. See
+  // IBEX_RATES_V2_DEFAULT_TIMEOUT_MS for why the first bound is set where it
+  // is, and change it there — the ibex-swap fallback leg and the `default.yaml`
+  // Ibex entry track the same number. Deployment values still override per
+  // exchange entry.
+  const defaultConfig = { timeout: IBEX_RATES_V2_DEFAULT_TIMEOUT_MS }
   return IbexExchangeService({
     base: base,
     quote: quote,
@@ -145,7 +152,9 @@ const createIbex = async (config: ExchangeConfig) => {
 
 const createIbexSwap = async (config: ExchangeConfig) => {
   const { base, quote } = config
-  const defaultConfig = { timeout: 5000 }
+  // The provider falls back to the same constant when this is missing or
+  // unusable, so the two cannot drift.
+  const defaultConfig = { timeout: DEFAULT_SWAP_RATES_TIMEOUT_MS }
   return IbexSwapExchangeService({
     base: base,
     quote: quote,

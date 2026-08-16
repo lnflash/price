@@ -1,5 +1,6 @@
 import { Mutex } from "async-mutex"
 import axios from "axios"
+import { metrics, type Counter } from "@opentelemetry/api"
 
 import {
   InvalidTickerError,
@@ -16,11 +17,82 @@ import { AuthenticationError } from "ibex-client/dist/errors"
 import { IBEX } from "@config"
 
 import { AuthCache } from "../ibex/cache"
-import { getIbexId } from "../ibex"
+import { getIbexId, IBEX_RATES_V2_DEFAULT_TIMEOUT_MS, IbexExchangeService } from "../ibex"
 
+// Module-scoped: shared by every base/quote pair of this provider. Only the
+// Swap Rates leg runs inside it — see `fetchTicker` at the bottom.
 const mutex = new Mutex()
 
+// Why a pair is being served off the legacy Rates v2 provider instead of
+// executable Swap Rates. Both are degraded states for the home market, and a
+// responder needs to tell them apart: "IBEX cannot price this pair" is a
+// standing condition, "the re-probe failed" is an incident.
+type LegacyFallbackReason = "pair-unsupported" | "probe-failed"
+
+// `refreshRealtimeData` stores whatever this provider returns under
+// `exchangeName: "IbexSwap"`, so nothing downstream distinguishes an
+// executable swap rate from a legacy mid-market one. Count every legacy serve
+// so the divergence is correlatable in Prometheus rather than only greppable.
+// Created lazily and then memoised for the life of the process, so it binds to
+// whichever provider is installed on the *first* call. run-monitoring therefore
+// installs the global provider before it starts anything that could price a
+// pair — see the comment on `setGlobalMeterProvider` there.
+let legacyServeCounter: Counter | undefined
+const countLegacyServe = (attributes: {
+  base: string
+  quote: string
+  reason: LegacyFallbackReason
+}) => {
+  try {
+    if (!legacyServeCounter) {
+      legacyServeCounter = metrics
+        .getMeter("ibex-swap")
+        .createCounter("ibex_swap_legacy_fallback_total", {
+          description:
+            "Tickers served from the legacy Ibex Rates v2 provider because Swap Rates could not price the pair",
+        })
+    }
+    legacyServeCounter.add(1, attributes)
+  } catch (error) {
+    // instrumentation must never take pricing down
+    baseLogger.debug({ error }, "IbexSwap: could not record legacy fallback metric")
+  }
+}
+
 type SwapRatesHttpResult = { status: number; body: unknown }
+
+// Returned by the mutex-guarded Swap Rates leg so the caller can run the legacy
+// leg *outside* the mutex.
+const UNSUPPORTED_PAIR = Symbol("swap-rates-unsupported-pair")
+
+// How long a pair stays pinned to the legacy provider before Swap Rates is
+// probed again. IBEX adding a missing pair (JMD above all) is the expected
+// outcome, not a hypothetical, so the decision has to expire on its own rather
+// than wait for a pod restart. Override with `config.unsupportedTtlSeconds`.
+const DEFAULT_UNSUPPORTED_TTL_SECS = 3600
+
+// Cap for the Swap Rates probe when the exchange entry configures none, or
+// configures one that cannot be used. `createIbexSwap` passes the same value.
+// Unlike Rates v2 (see IBEX_RATES_V2_DEFAULT_TIMEOUT_MS) GET /rates gets the
+// 5s every other provider defaults to: a probe that times out falls back to
+// the legacy leg rather than dropping the pair onto a mid-market FX provider.
+export const DEFAULT_SWAP_RATES_TIMEOUT_MS = 5000
+
+// GET /rates covers fewer currencies than the legacy Rates v2 endpoint: JMD,
+// HTG and CAD (among others) answer 400 {"error":"to currency is not
+// supported"} (verified live against sandbox). Those are not transient, and JMD
+// is the home market — failing them here would leave the app pricing Jamaica
+// off a mid-market FX provider instead of IBEX's own rate. Detect that answer
+// and serve the pair from the legacy provider instead.
+//
+// Matched on the full "currency is not supported" phrase rather than a bare
+// "not supported": an unrelated 400 (an entitlement or account-scope error,
+// say) must not divert a pair that Swap Rates can actually price.
+const isUnsupportedCurrencyBody = (body: unknown): boolean => {
+  if (!body || typeof body !== "object") return false
+  const { error } = body as { error?: unknown }
+  return typeof error === "string" && /currency is not supported/i.test(error)
+}
 
 // IBEX "Swap Rates" provider (docs.poweredbyibex.io/reference/swap-rates).
 //
@@ -34,7 +106,25 @@ export const IbexSwapExchangeService = async ({
   config,
 }: IbexSwapExchangeServiceArgs): Promise<IExchangeService | ExchangeServiceError> => {
   const cacheSeconds = Number(config?.cacheSeconds || 180)
-  const timeout = Number(config?.timeout || 5000)
+  // Same fail-*closed* guard as `../ibex` and the `legacyTimeout` leg below —
+  // one idiom for all three. A helm values `timeout: 10s` parses to NaN, and
+  // axios reads the value with a plain truthiness check
+  // (`if (own('timeout'))`), so NaN installs no cap at all. That matters more
+  // here than anywhere else in this file: this probe runs inside the
+  // module-scoped `mutex`, so an uncapped hung request parks the ticker of
+  // every pair this provider serves for undici's ~300s.
+  const configuredTimeout = Number(config?.timeout)
+  const timeoutIsUsable = Number.isFinite(configuredTimeout) && configuredTimeout > 0
+  const timeout = timeoutIsUsable ? configuredTimeout : DEFAULT_SWAP_RATES_TIMEOUT_MS
+  if (config?.timeout !== undefined && !timeoutIsUsable) {
+    baseLogger.warn(
+      { base, quote, configuredTimeout: config.timeout, timeout },
+      "IbexSwap: unusable `timeout` in exchange config, using the default cap instead",
+    )
+  }
+  const configuredUnsupportedTtl = Number(config?.unsupportedTtlSeconds)
+  const unsupportedTtlSecs =
+    configuredUnsupportedTtl > 0 ? configuredUnsupportedTtl : DEFAULT_UNSUPPORTED_TTL_SECS
 
   // Same credentials, environment resolution and (redis-backed) token cache as
   // the legacy `ibex` provider — ibex-client owns the oauth client-credentials
@@ -53,6 +143,135 @@ export const IbexSwapExchangeService = async ({
   const cacheKey = `${CacheKeys.CurrentTicker}:IbexSwap:${base}:${quote}`
   const cacheTtlSecs = Number(cacheSeconds)
   const cacheKeyStatus = `${cacheKey}:status`
+  const cacheKeyUnsupported = `${cacheKey}:unsupported`
+
+  // Memoises the legacy service *instance* only — building it is the expensive
+  // part. Whether we use it is decided by the TTL'd `:unsupported` cache entry,
+  // never by this variable, so a pair that gains Swap Rates support recovers
+  // without a restart.
+  let legacyService: IExchangeService | null = null
+
+  // Set once Swap Rates has told us this pair is unsupported, and cleared as
+  // soon as a probe succeeds. It never suppresses a probe — the TTL'd
+  // `:unsupported` entry alone decides that — it only decides what we serve
+  // when a probe *fails*. Without it, the hour the flag ages out is an hour in
+  // which any non-400 answer (a transient 500, a timeout) returns an error and
+  // poisons `:status`, taking the home market off IBEX rates for the whole
+  // status TTL. Clearing it on success is what keeps it from outliving the
+  // condition it names: a pair that genuinely gains Swap Rates support must
+  // not be knocked back onto legacy mid-market rates by the next transient
+  // 5xx, silently, for the rest of the process's life.
+  let hasFallenBack = false
+
+  // What this pair is currently being served from, so a fallback shows up in
+  // the logs without printing a line on every 15s tick. `null` = Swap Rates.
+  // Both directions are logged at `warn` and carry a `fallback` field: one
+  // level, one field bounds the whole episode for whoever is asking why JMD
+  // moved differently from USD.
+  let servingLegacyBecause: LegacyFallbackReason | null = null
+
+  const noteServingLegacy = (reason: LegacyFallbackReason) => {
+    if (servingLegacyBecause === reason) return
+    servingLegacyBecause = reason
+    baseLogger.warn(
+      { base, quote, exchangeName: "IbexSwap", fallback: true, reason },
+      reason === "pair-unsupported"
+        ? "IbexSwap: serving legacy Ibex Rates v2 (mid-market) — Swap Rates does not support this pair"
+        : "IbexSwap: serving legacy Ibex Rates v2 (mid-market) — the Swap Rates re-probe failed",
+    )
+  }
+
+  const noteServingSwapRates = () => {
+    if (servingLegacyBecause === null) return
+    servingLegacyBecause = null
+    baseLogger.warn(
+      { base, quote, exchangeName: "IbexSwap", fallback: false },
+      "IbexSwap: back on executable Swap Rates for this pair",
+    )
+  }
+
+  const cacheErrorStatus = async (status: number) => {
+    await LocalCacheService().set<number>({
+      key: cacheKeyStatus,
+      value: status,
+      ttlSecs: toSeconds(cacheTtlSecs > 0 ? cacheTtlSecs : 300),
+    })
+  }
+
+  const markPairUnsupported = async () => {
+    hasFallenBack = true
+    await LocalCacheService().set<number>({
+      key: cacheKeyUnsupported,
+      value: 1,
+      ttlSecs: toSeconds(unsupportedTtlSecs),
+    })
+    baseLogger.warn(
+      {
+        base,
+        quote,
+        exchangeName: "IbexSwap",
+        fallback: true,
+        reprobeInSecs: unsupportedTtlSecs,
+      },
+      "IbexSwap: pair unsupported by Swap Rates, using legacy Ibex rates",
+    )
+  }
+
+  const isPairUnsupported = async (): Promise<boolean> => {
+    const flag = await LocalCacheService().get<number>(cacheKeyUnsupported)
+    if (flag instanceof Error) return false
+    return !!flag
+  }
+
+  const legacyTicker = async (): Promise<Ticker | ServiceError> => {
+    if (!legacyService) {
+      // The legacy leg gets its own cap rather than inheriting this probe's.
+      // `createIbexSwap` defaults `timeout` to 5s for GET /rates, but Rates v2
+      // deliberately ships the looser IBEX_RATES_V2_DEFAULT_TIMEOUT_MS (its
+      // latency is unmeasured, and cutting it drops the pair onto a mid-market
+      // FX provider — the exact outcome this fallback exists to prevent).
+      // Forwarding `config` verbatim would hand the JMD fallback the 5s cap.
+      // The same constant is what `createIbex` uses, so tightening Rates v2
+      // cannot leave this leg — the whole point of this provider — behind.
+      const configuredLegacyTimeout = Number(config?.legacyTimeout)
+      const legacyTimeout =
+        Number.isFinite(configuredLegacyTimeout) && configuredLegacyTimeout > 0
+          ? configuredLegacyTimeout
+          : IBEX_RATES_V2_DEFAULT_TIMEOUT_MS
+      const legacy = await IbexExchangeService({
+        base,
+        quote,
+        config: { ...config, timeout: legacyTimeout },
+      })
+      if (legacy instanceof Error) return legacy
+      legacyService = legacy
+    }
+    return legacyService.fetchTicker()
+  }
+
+  const fetchViaLegacyProvider = async (
+    reason: LegacyFallbackReason,
+  ): Promise<Ticker | ServiceError> => {
+    noteServingLegacy(reason)
+    const result = await legacyTicker()
+    // Both legs are down: back the pair off like any other failure here, so the
+    // Swap Rates probe is not retried on every 15s tick while the legacy
+    // provider cannot even be constructed. 503 is a synthetic marker — no Swap
+    // Rates request produced it — and it only gates the probe, never the legacy
+    // leg above.
+    if (result instanceof Error) {
+      await cacheErrorStatus(503)
+      return result
+    }
+    // Counted here rather than next to the log, and only once the legacy leg
+    // has actually produced a ticker: the metric's own description promises
+    // *tickers served*, so a both-legs-down episode — where nothing is priced
+    // at all — must not climb it once per tick. This is the signal used to
+    // correlate "the displayed price was mid-market" with a divergence; an
+    // outage inflating it by exactly the outage would make it useless for that.
+    countLegacyServe({ base, quote, reason })
+    return result
+  }
 
   const getCachedRates = async (): Promise<IbexSwapRates | undefined> => {
     const cachedRates = await LocalCacheService().get<IbexSwapRates>(cacheKey)
@@ -66,7 +285,9 @@ export const IbexSwapExchangeService = async ({
     return status
   }
 
-  const fetchTicker = async (): Promise<Ticker | ServiceError> => {
+  const fetchViaSwapRates = async (): Promise<
+    Ticker | ServiceError | typeof UNSUPPORTED_PAIR
+  > => {
     // Swap Rates responses carry no timestamp — rates are quoted "now"
     const timestamp = new Date().getTime()
 
@@ -120,12 +341,12 @@ export const IbexSwapExchangeService = async ({
         return new ExchangeServiceError(authResp.message)
 
       const { status, body } = authResp as SwapRatesHttpResult
+      if (status === 400 && isUnsupportedCurrencyBody(body)) {
+        await markPairUnsupported()
+        return UNSUPPORTED_PAIR
+      }
       if (status >= 400) {
-        await LocalCacheService().set<number>({
-          key: cacheKeyStatus,
-          value: status,
-          ttlSecs: toSeconds(cacheTtlSecs > 0 ? cacheTtlSecs : 300),
-        })
+        await cacheErrorStatus(status)
         return new UnknownExchangeServiceError(`Invalid response. Status ${status}`)
       }
 
@@ -148,9 +369,78 @@ export const IbexSwapExchangeService = async ({
     }
   }
 
-  return {
-    fetchTicker: () => mutex.runExclusive(fetchTicker),
+  // Bound the *mutex hold*, not just the axios call. `timeout` is handed to
+  // axios, which bounds GET /rates — but `withAuth` runs an OAuth token request
+  // first, and that is a bare global `fetch` with no signal
+  // (ibex-client/dist/authentication/index.js:28). On a cold token cache or an
+  // expiry refresh a stalled auth host would therefore hang on undici's ~300s
+  // defaults *inside* `mutex`, which is module-scoped — one lock for every
+  // base/quote pair this provider serves. Racing the whole probe releases the
+  // lock on schedule even though there is nothing to abort a bare `fetch` with.
+  //
+  // The losing branch keeps running: it cannot reject (`fetchViaSwapRates`
+  // catches everything and returns an error value) and it writes only this
+  // pair's own cache keys. Nothing writes `:status` on this path, so a capped
+  // probe does not gate the legacy leg.
+  const probeWithinTimeout = async (): Promise<
+    Ticker | ServiceError | typeof UNSUPPORTED_PAIR
+  > => {
+    let capTimer: ReturnType<typeof setTimeout> | undefined
+    const cap = new Promise<ServiceError>((resolve) => {
+      capTimer = setTimeout(() => {
+        baseLogger.warn(
+          { base, quote, timeout },
+          "IbexSwap: probe exceeded the configured timeout, releasing the shared lock",
+        )
+        resolve(new UnknownExchangeServiceError(`Swap Rates probe exceeded ${timeout}ms`))
+      }, timeout)
+    })
+
+    try {
+      return await Promise.race([fetchViaSwapRates(), cap])
+    } finally {
+      if (capTimer !== undefined) clearTimeout(capTimer)
+    }
   }
+
+  const fetchTicker = async (): Promise<Ticker | ServiceError> => {
+    // A pair Swap Rates has told us it does not support goes straight to the
+    // legacy provider, ahead of the cached-error backoff inside
+    // `fetchViaSwapRates` — a transient 500 on BTC:JMD must not knock the home
+    // market onto a mid-market FX provider for the length of the status TTL.
+    //
+    // Deliberately outside `mutex`: that mutex is module-scoped, i.e. one lock
+    // for every base/quote pair of this provider. The legacy leg has its own
+    // (`../ibex`) plus a retry inside withAuth, so holding this one across it
+    // would let a slow Rates v2 call for one fallen-back pair queue up every
+    // other pair Swap Rates does serve.
+    if (await isPairUnsupported()) return fetchViaLegacyProvider("pair-unsupported")
+
+    const result = await mutex.runExclusive(probeWithinTimeout)
+    if (result === UNSUPPORTED_PAIR) return fetchViaLegacyProvider("pair-unsupported")
+    // A probe that succeeds is the only evidence the pair is priceable off
+    // executable rates again, so it is also the only thing that clears
+    // `hasFallenBack`. Leaving the flag set past a recovery would route the
+    // next transient 5xx back to legacy mid-market rates — under the IbexSwap
+    // name, with no log — on a pair Swap Rates can price, for the rest of the
+    // process's life.
+    if (!(result instanceof Error)) {
+      hasFallenBack = false
+      noteServingSwapRates()
+      return result
+    }
+    // The re-probe above runs every time the `:unsupported` flag ages out, and
+    // a probe can fail for reasons that have nothing to do with the pair being
+    // supported again (5xx, timeout, malformed body). For a pair we have
+    // already fallen back once, that answer must not become the tick's result:
+    // it would both serve an error for the home market and — via the `:status`
+    // write inside `fetchViaSwapRates` — suppress the legacy leg for the whole
+    // status TTL. Keep serving legacy until a probe actually succeeds.
+    if (hasFallenBack) return fetchViaLegacyProvider("probe-failed")
+    return result
+  }
+
+  return { fetchTicker }
 }
 
 const unauthorizedError = (message: string): Error & { status: number } =>
