@@ -135,7 +135,15 @@ const createYadio = async (config: ExchangeConfig) => {
 
 const createIbex = async (config: ExchangeConfig) => {
   const { base, quote } = config
-  const defaultConfig = { timeout: 5000 }
+  // 10s, not the 5s every other provider defaults to. `IbexExchangeService`
+  // ignored `timeout` until now, so this provider — which is live in prod —
+  // has always run on the ibex-client sdk's 30s default. Honouring the value
+  // at 5000 would be a silent 30s -> 5s cut, and any Rates v2 call whose p99
+  // sits above 5s would start erroring where it previously waited and
+  // succeeded, dropping JMD onto a mid-market FX provider. Rates v2 latency is
+  // not measured yet; start conservative (still well inside the 15s tick) and
+  // tighten once it is. Deployment values can override per exchange entry.
+  const defaultConfig = { timeout: 10000 }
   return IbexExchangeService({
     base: base,
     quote: quote,

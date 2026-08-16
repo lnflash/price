@@ -40,9 +40,17 @@ export const IbexExchangeService = async ({
 
   // The api-sdk under ibex-client defaults to a 30s fetch timeout, and withAuth
   // retries once on 401 — so an unconfigured call can park for ~60s. The
-  // exchange factory passes `timeout: 5000`; honour it. This matters beyond
-  // this provider: `ibex-swap` serves the pairs Swap Rates does not support
-  // (JMD, HTG, CAD) through here, on the polling loop's 15s tick.
+  // exchange factory has always passed a `timeout`; this provider ignored it
+  // until now. Honour it. This matters beyond this provider: `ibex-swap`
+  // serves the pairs Swap Rates does not support (JMD, HTG, CAD) through here,
+  // on the polling loop's 15s tick.
+  //
+  // Rollout note: this is a live behaviour change for the `ibex` provider,
+  // which prod still runs — it goes from the sdk's 30s to whatever is
+  // configured. `createIbex` therefore defaults to 10000 rather than the 5000
+  // every other provider uses, because Rates v2's latency distribution is not
+  // measured yet and a too-tight cap would error out calls that previously
+  // waited and succeeded. See the comment there before tightening it.
   if (timeout > 0) Ibex.ibex.config({ timeout })
 
   const cacheKey = `${CacheKeys.CurrentTicker}:Ibex:${base}:${quote}`

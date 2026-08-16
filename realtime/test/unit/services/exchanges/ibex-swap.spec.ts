@@ -435,6 +435,43 @@ describe("IbexSwapExchangeService", () => {
       })
     })
 
+    it("keeps serving the legacy provider when the post-expiry re-probe fails", async () => {
+      // The TTL guarantees the `:unsupported` flag dies every hour, so the
+      // re-probe is a recurring event, not an edge case. If that probe answers
+      // anything other than a clean 400-unsupported it is *not* evidence the
+      // pair is priceable again — and worse, it writes `:status`, which would
+      // short-circuit every later tick into the backoff error. JMD must stay
+      // on IBEX rates across the whole episode.
+      const { store } = mockStatefulLocalCache()
+      ;(axios.get as jest.Mock).mockResolvedValue(unsupported)
+      const legacyFetchTicker = jest.fn(async () => legacyTicker)
+      jest
+        .spyOn(IbexImpl, "IbexExchangeService")
+        .mockResolvedValue({ fetchTicker: legacyFetchTicker })
+
+      const service = await IbexSwapExchangeService({
+        base: "BTC",
+        quote: "JMD",
+        config: { cacheSeconds: 300 },
+      })
+      if (service instanceof Error) throw service
+
+      await expect(service.fetchTicker()).resolves.toEqual(legacyTicker)
+
+      // the flag ages out; the re-probe hits a transient 500
+      store.delete(unsupportedKey)
+      ;(axios.get as jest.Mock).mockClear()
+      ;(axios.get as jest.Mock).mockResolvedValue({ data: {}, status: 500 })
+
+      await expect(service.fetchTicker()).resolves.toEqual(legacyTicker)
+      // ...and the ticks after it, which the poisoned `:status` now gates
+      await expect(service.fetchTicker()).resolves.toEqual(legacyTicker)
+      await expect(service.fetchTicker()).resolves.toEqual(legacyTicker)
+
+      expect(axios.get).toHaveBeenCalledTimes(1)
+      expect(legacyFetchTicker).toHaveBeenCalledTimes(4)
+    })
+
     it("keeps serving the legacy provider even when the error backoff is cached", async () => {
       const { store } = mockStatefulLocalCache()
       ;(axios.get as jest.Mock).mockResolvedValue(unsupported)
@@ -485,12 +522,15 @@ describe("IbexSwapExchangeService", () => {
         expect.objectContaining({ key: statusKey, value: 503, ttlSecs: 300 }),
       )
 
-      // and the backoff still holds once the unsupported flag ages out
+      // and the backoff still holds once the unsupported flag ages out — the
+      // caller sees the legacy provider's own error, not a probe result
       store.delete(unsupportedKey)
       ;(axios.get as jest.Mock).mockClear()
 
       const result = await service.fetchTicker()
-      expect(result).toBeInstanceOf(UnknownExchangeServiceError)
+      expect(result).toBeInstanceOf(ExchangeServiceError)
+      expect(result).not.toBeInstanceOf(UnknownExchangeServiceError)
+      expect((result as Error).message).toBe("legacy unavailable")
       expect(axios.get).not.toHaveBeenCalled()
     })
 

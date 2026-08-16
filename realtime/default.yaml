@@ -26,6 +26,13 @@ exchanges:
   cron: "*/15 * * * * *"
   config:
     cacheSeconds: 180
+    # This provider ignored `timeout` until now and ran on the ibex-client
+    # sdk's 30s default (~60s worst case: withAuth retries once on 401). It
+    # now honours the value, so this is a live behaviour change — kept
+    # deliberately loose until Rates v2's latency distribution is measured.
+    # Same default lives in `createIbex` for deployments that replace this
+    # exchanges list wholesale.
+    timeout: 10000
 - name: "free-currency-rates-usd"
   enabled: true
   quoteAlias: "*"

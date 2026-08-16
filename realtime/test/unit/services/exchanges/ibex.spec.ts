@@ -1,5 +1,6 @@
 import { InvalidExchangeConfigError } from "@domain/exchanges"
 import { IBEX } from "@config"
+import { ExchangeFactory } from "@services/exchanges"
 import { IbexExchangeService } from "@services/exchanges/ibex"
 
 const sdkConfig = jest.fn()
@@ -40,10 +41,11 @@ describe("IbexExchangeService", () => {
     jest.restoreAllMocks()
   })
 
-  // The exchange factory passes `timeout: 5000` (services/exchanges/index.ts).
-  // Dropping it on the floor left every Rates v2 call on the sdk's 30s default,
-  // doubled by withAuth's single retry — and `ibex-swap` routes the pairs Swap
-  // Rates cannot price (JMD, HTG, CAD) through here, on a 15s polling tick.
+  // The exchange factory has always passed a `timeout`
+  // (services/exchanges/index.ts). Dropping it on the floor left every Rates v2
+  // call on the sdk's 30s default, doubled by withAuth's single retry — and
+  // `ibex-swap` routes the pairs Swap Rates cannot price (JMD, HTG, CAD)
+  // through here, on a 15s polling tick.
   it("caps the sdk fetch timeout at the configured timeout", async () => {
     const service = await IbexExchangeService({
       base: "BTC",
@@ -60,6 +62,29 @@ describe("IbexExchangeService", () => {
     if (service instanceof Error) throw service
 
     expect(sdkConfig).toHaveBeenCalledWith({ timeout: 5000 })
+  })
+
+  // Rollout guard. Honouring `timeout` is a live behaviour change for a
+  // provider prod still runs: it goes from the sdk's 30s to whatever the
+  // factory hands it. So the factory deliberately does *not* hand it the 5000
+  // every other provider defaults to — tightening this before Rates v2's
+  // latency distribution is measured would start erroring calls that
+  // previously waited and succeeded, dropping JMD onto a mid-market FX
+  // provider. Change the number here and in `createIbex` together, with data.
+  it("defaults the ibex provider to a conservative timeout in the factory", async () => {
+    const service = await ExchangeFactory().create({
+      provider: "ibex",
+      name: "ibex-factory-timeout-default",
+      base: "BTC",
+      quote: "JMD",
+      quoteAlias: "",
+      excludedQuotes: [],
+      cron: "",
+      config: {},
+    })
+    if (service instanceof Error) throw service
+
+    expect(sdkConfig).toHaveBeenCalledWith({ timeout: 10000 })
   })
 
   it("returns InvalidExchangeConfigError without credentials", async () => {

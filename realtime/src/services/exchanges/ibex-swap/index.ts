@@ -92,6 +92,15 @@ export const IbexSwapExchangeService = async ({
   // without a restart.
   let legacyService: IExchangeService | null = null
 
+  // Set once Swap Rates has told us this pair is unsupported. It never
+  // suppresses a probe — the TTL'd `:unsupported` entry alone decides that —
+  // it only decides what we serve when a probe *fails*. Without it, the hour
+  // the flag ages out is an hour in which any non-400 answer (a transient 500,
+  // a timeout) returns an error and poisons `:status`, taking the home market
+  // off IBEX rates for the whole status TTL. A pair that genuinely gains Swap
+  // Rates support probes successfully and stops reaching this at all.
+  let hasFallenBack = false
+
   const cacheErrorStatus = async (status: number) => {
     await LocalCacheService().set<number>({
       key: cacheKeyStatus,
@@ -101,6 +110,7 @@ export const IbexSwapExchangeService = async ({
   }
 
   const markPairUnsupported = async () => {
+    hasFallenBack = true
     await LocalCacheService().set<number>({
       key: cacheKeyUnsupported,
       value: 1,
@@ -249,6 +259,14 @@ export const IbexSwapExchangeService = async ({
 
     const result = await mutex.runExclusive(fetchViaSwapRates)
     if (result === UNSUPPORTED_PAIR) return fetchViaLegacyProvider()
+    // The re-probe above runs every time the `:unsupported` flag ages out, and
+    // a probe can fail for reasons that have nothing to do with the pair being
+    // supported again (5xx, timeout, malformed body). For a pair we have
+    // already fallen back once, that answer must not become the tick's result:
+    // it would both serve an error for the home market and — via the `:status`
+    // write inside `fetchViaSwapRates` — suppress the legacy leg for the whole
+    // status TTL. Keep serving legacy until a probe actually succeeds.
+    if (result instanceof Error && hasFallenBack) return fetchViaLegacyProvider()
     return result
   }
 
