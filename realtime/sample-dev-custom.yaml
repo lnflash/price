@@ -23,3 +23,8 @@ exchanges:
     cron: "*/15 * * * * *"
     config:
       cacheSeconds: 180
+      # Pairs GET /rates rejects with "currency is not supported" (JMD, HTG,
+      # CAD) are served by the legacy "ibex" provider instead. That decision
+      # expires after this many seconds so the pair is re-probed — IBEX adding
+      # a currency should not need a pod restart to take effect.
+      unsupportedTtlSeconds: 3600

@@ -23,6 +23,7 @@ export const IbexExchangeService = async ({
   config,
 }: IbexExchangeServiceArgs): Promise<IExchangeService | ExchangeServiceError> => {
   const cacheSeconds = config?.cacheSeconds || 180
+  const timeout = Number(config?.timeout || 5000)
 
   if (!IBEX.clientId || !IBEX.clientSecret) {
     return new InvalidExchangeConfigError("IBEX client credentials are required")
@@ -36,6 +37,13 @@ export const IbexExchangeService = async ({
     },
     AuthCache,
   )
+
+  // The api-sdk under ibex-client defaults to a 30s fetch timeout, and withAuth
+  // retries once on 401 — so an unconfigured call can park for ~60s. The
+  // exchange factory passes `timeout: 5000`; honour it. This matters beyond
+  // this provider: `ibex-swap` serves the pairs Swap Rates does not support
+  // (JMD, HTG, CAD) through here, on the polling loop's 15s tick.
+  if (timeout > 0) Ibex.ibex.config({ timeout })
 
   const cacheKey = `${CacheKeys.CurrentTicker}:Ibex:${base}:${quote}`
   const cacheTtlSecs = Number(cacheSeconds)

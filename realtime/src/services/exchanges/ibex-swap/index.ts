@@ -18,20 +18,36 @@ import { IBEX } from "@config"
 import { AuthCache } from "../ibex/cache"
 import { getIbexId, IbexExchangeService } from "../ibex"
 
+// Module-scoped: shared by every base/quote pair of this provider. Only the
+// Swap Rates leg runs inside it — see `fetchTicker` at the bottom.
 const mutex = new Mutex()
 
 type SwapRatesHttpResult = { status: number; body: unknown }
 
+// Returned by the mutex-guarded Swap Rates leg so the caller can run the legacy
+// leg *outside* the mutex.
+const UNSUPPORTED_PAIR = Symbol("swap-rates-unsupported-pair")
+
+// How long a pair stays pinned to the legacy provider before Swap Rates is
+// probed again. IBEX adding a missing pair (JMD above all) is the expected
+// outcome, not a hypothetical, so the decision has to expire on its own rather
+// than wait for a pod restart. Override with `config.unsupportedTtlSeconds`.
+const DEFAULT_UNSUPPORTED_TTL_SECS = 3600
+
 // GET /rates covers fewer currencies than the legacy Rates v2 endpoint: JMD,
-// HTG and CAD (among others) answer 400 "to currency is not supported"
-// (verified live against sandbox). Those are not transient, and JMD is the
-// home market — failing them here would leave the app pricing Jamaica off a
-// mid-market FX provider instead of IBEX's own rate. Detect that answer and
-// serve the pair from the legacy provider instead.
+// HTG and CAD (among others) answer 400 {"error":"to currency is not
+// supported"} (verified live against sandbox). Those are not transient, and JMD
+// is the home market — failing them here would leave the app pricing Jamaica
+// off a mid-market FX provider instead of IBEX's own rate. Detect that answer
+// and serve the pair from the legacy provider instead.
+//
+// Matched on the full "currency is not supported" phrase rather than a bare
+// "not supported": an unrelated 400 (an entitlement or account-scope error,
+// say) must not divert a pair that Swap Rates can actually price.
 const isUnsupportedCurrencyBody = (body: unknown): boolean => {
   if (!body || typeof body !== "object") return false
   const { error } = body as { error?: unknown }
-  return typeof error === "string" && /not supported/i.test(error)
+  return typeof error === "string" && /currency is not supported/i.test(error)
 }
 
 // IBEX "Swap Rates" provider (docs.poweredbyibex.io/reference/swap-rates).
@@ -47,6 +63,9 @@ export const IbexSwapExchangeService = async ({
 }: IbexSwapExchangeServiceArgs): Promise<IExchangeService | ExchangeServiceError> => {
   const cacheSeconds = Number(config?.cacheSeconds || 180)
   const timeout = Number(config?.timeout || 5000)
+  const configuredUnsupportedTtl = Number(config?.unsupportedTtlSeconds)
+  const unsupportedTtlSecs =
+    configuredUnsupportedTtl > 0 ? configuredUnsupportedTtl : DEFAULT_UNSUPPORTED_TTL_SECS
 
   // Same credentials, environment resolution and (redis-backed) token cache as
   // the legacy `ibex` provider — ibex-client owns the oauth client-credentials
@@ -65,23 +84,58 @@ export const IbexSwapExchangeService = async ({
   const cacheKey = `${CacheKeys.CurrentTicker}:IbexSwap:${base}:${quote}`
   const cacheTtlSecs = Number(cacheSeconds)
   const cacheKeyStatus = `${cacheKey}:status`
+  const cacheKeyUnsupported = `${cacheKey}:unsupported`
 
-  // Set once, when Swap Rates tells us this pair is unsupported; from then on
-  // every fetch for this instance is served by the legacy provider. The
-  // exchange factory memoises one service per base/quote, so this is per pair.
-  let legacyFallback: IExchangeService | null = null
+  // Memoises the legacy service *instance* only — building it is the expensive
+  // part. Whether we use it is decided by the TTL'd `:unsupported` cache entry,
+  // never by this variable, so a pair that gains Swap Rates support recovers
+  // without a restart.
+  let legacyService: IExchangeService | null = null
 
-  const fetchViaLegacyProvider = async (): Promise<Ticker | ServiceError> => {
-    if (!legacyFallback) {
+  const cacheErrorStatus = async (status: number) => {
+    await LocalCacheService().set<number>({
+      key: cacheKeyStatus,
+      value: status,
+      ttlSecs: toSeconds(cacheTtlSecs > 0 ? cacheTtlSecs : 300),
+    })
+  }
+
+  const markPairUnsupported = async () => {
+    await LocalCacheService().set<number>({
+      key: cacheKeyUnsupported,
+      value: 1,
+      ttlSecs: toSeconds(unsupportedTtlSecs),
+    })
+    baseLogger.info(
+      { base, quote, reprobeInSecs: unsupportedTtlSecs },
+      "IbexSwap: pair unsupported by Swap Rates, using legacy Ibex rates",
+    )
+  }
+
+  const isPairUnsupported = async (): Promise<boolean> => {
+    const flag = await LocalCacheService().get<number>(cacheKeyUnsupported)
+    if (flag instanceof Error) return false
+    return !!flag
+  }
+
+  const legacyTicker = async (): Promise<Ticker | ServiceError> => {
+    if (!legacyService) {
       const legacy = await IbexExchangeService({ base, quote, config })
       if (legacy instanceof Error) return legacy
-      legacyFallback = legacy
-      baseLogger.info(
-        { base, quote },
-        "IbexSwap: pair unsupported by Swap Rates, using legacy Ibex rates",
-      )
+      legacyService = legacy
     }
-    return legacyFallback.fetchTicker()
+    return legacyService.fetchTicker()
+  }
+
+  const fetchViaLegacyProvider = async (): Promise<Ticker | ServiceError> => {
+    const result = await legacyTicker()
+    // Both legs are down: back the pair off like any other failure here, so the
+    // Swap Rates probe is not retried on every 15s tick while the legacy
+    // provider cannot even be constructed. 503 is a synthetic marker — no Swap
+    // Rates request produced it — and it only gates the probe, never the legacy
+    // leg above.
+    if (result instanceof Error) await cacheErrorStatus(503)
+    return result
   }
 
   const getCachedRates = async (): Promise<IbexSwapRates | undefined> => {
@@ -96,15 +150,13 @@ export const IbexSwapExchangeService = async ({
     return status
   }
 
-  const fetchTicker = async (): Promise<Ticker | ServiceError> => {
+  const fetchViaSwapRates = async (): Promise<
+    Ticker | ServiceError | typeof UNSUPPORTED_PAIR
+  > => {
     // Swap Rates responses carry no timestamp — rates are quoted "now"
     const timestamp = new Date().getTime()
 
     try {
-      // Established fallback wins over everything else, including the cached
-      // error status below — that pair never comes back from Swap Rates.
-      if (legacyFallback) return fetchViaLegacyProvider()
-
       const cachedRates = await getCachedRates()
       if (cachedRates) return tickerFromRaw({ ...cachedRates, timestamp })
 
@@ -155,14 +207,11 @@ export const IbexSwapExchangeService = async ({
 
       const { status, body } = authResp as SwapRatesHttpResult
       if (status === 400 && isUnsupportedCurrencyBody(body)) {
-        return fetchViaLegacyProvider()
+        await markPairUnsupported()
+        return UNSUPPORTED_PAIR
       }
       if (status >= 400) {
-        await LocalCacheService().set<number>({
-          key: cacheKeyStatus,
-          value: status,
-          ttlSecs: toSeconds(cacheTtlSecs > 0 ? cacheTtlSecs : 300),
-        })
+        await cacheErrorStatus(status)
         return new UnknownExchangeServiceError(`Invalid response. Status ${status}`)
       }
 
@@ -185,9 +234,25 @@ export const IbexSwapExchangeService = async ({
     }
   }
 
-  return {
-    fetchTicker: () => mutex.runExclusive(fetchTicker),
+  const fetchTicker = async (): Promise<Ticker | ServiceError> => {
+    // A pair Swap Rates has told us it does not support goes straight to the
+    // legacy provider, ahead of the cached-error backoff inside
+    // `fetchViaSwapRates` — a transient 500 on BTC:JMD must not knock the home
+    // market onto a mid-market FX provider for the length of the status TTL.
+    //
+    // Deliberately outside `mutex`: that mutex is module-scoped, i.e. one lock
+    // for every base/quote pair of this provider. The legacy leg has its own
+    // (`../ibex`) plus a retry inside withAuth, so holding this one across it
+    // would let a slow Rates v2 call for one fallen-back pair queue up every
+    // other pair Swap Rates does serve.
+    if (await isPairUnsupported()) return fetchViaLegacyProvider()
+
+    const result = await mutex.runExclusive(fetchViaSwapRates)
+    if (result === UNSUPPORTED_PAIR) return fetchViaLegacyProvider()
+    return result
   }
+
+  return { fetchTicker }
 }
 
 const unauthorizedError = (message: string): Error & { status: number } =>
