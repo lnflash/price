@@ -17,6 +17,11 @@ const readline = require("node:readline")
  *   - a waiver that no longer matches anything also fails, so entries cannot
  *     quietly outlive the dependency that needed them.
  *
+ * The gate also reconciles the two independent halves of yarn's output: the
+ * summary counts it prints against the advisories it decides on. A summary
+ * reporting critical/high paths with no advisories parsed means the parser has
+ * gone blind, and that fails rather than reporting clean.
+ *
  * The decision logic is exported so scripts/audit-high.selftest.js can prove
  * every one of those failure modes in CI. A gate nobody has watched fail is
  * indistinguishable from no gate.
@@ -67,7 +72,11 @@ const evaluate = ({ advisories, summary, waivers = WAIVERS, today }) => {
 
   const expired = new Set(waivers.filter((w) => w.reviewBy < today).map((w) => w.id))
   for (const w of waivers) {
-    if (expired.has(w.id)) {
+    // A waiver that is both expired and orphaned gets only the orphan message
+    // below: "extend the review date" is the wrong instruction once the
+    // advisory it covers is gone, and two contradictory failures for one
+    // waiver is worse guidance than none.
+    if (expired.has(w.id) && advisories.has(w.id)) {
       failures.push(
         `Waiver for ${w.id} (${w.module}) expired on ${w.reviewBy}. Re-check the ` +
           `advisory: apply the fix if one now exists, or extend the waiver with a ` +
@@ -94,11 +103,29 @@ const evaluate = ({ advisories, summary, waivers = WAIVERS, today }) => {
     )
   }
 
+  // The counts we print and the advisories we gate on come from two different
+  // yarn events. If they ever disagree — yarn says there are critical/high
+  // paths but we parsed no advisory to attribute them to — the parser has lost
+  // track of the audit output and every finding is invisible to the gate. That
+  // is a silent green, the one failure mode a security check must never have.
+  const reportedBlocking = (summary.critical || 0) + (summary.high || 0)
+  if (reportedBlocking > 0 && blocking.length === 0) {
+    failures.push(
+      `yarn reported ${reportedBlocking} critical/high path(s) but zero advisories ` +
+        `were parsed — the audit output format or the parser changed. Refusing to ` +
+        `report this as clean.`,
+    )
+  }
+
   const waived = blocking.filter((a) => waiverById.has(a.id) && !expired.has(a.id))
   if (waived.length > 0) {
     lines.push(`\nWaived (${waived.length}), each re-checked by its review date:`)
     for (const a of waived) {
-      lines.push(`  - ${a.severity} ${a.module} ${a.id} — review by ${waiverById.get(a.id).reviewBy}`)
+      lines.push(
+        `  - ${a.severity} ${a.module} ${a.id} — review by ${
+          waiverById.get(a.id).reviewBy
+        }`,
+      )
     }
   }
 
