@@ -130,7 +130,22 @@ export const IbexSwapExchangeService = async ({
 
   const legacyTicker = async (): Promise<Ticker | ServiceError> => {
     if (!legacyService) {
-      const legacy = await IbexExchangeService({ base, quote, config })
+      // The legacy leg gets its own cap rather than inheriting this probe's.
+      // `createIbexSwap` defaults `timeout` to 5s for GET /rates, but
+      // `createIbex` deliberately ships 10s for Rates v2 (its latency is
+      // unmeasured, and cutting it drops the pair onto a mid-market FX
+      // provider — the exact outcome this fallback exists to prevent).
+      // Forwarding `config` verbatim would hand the JMD fallback the 5s cap.
+      const configuredLegacyTimeout = Number(config?.legacyTimeout)
+      const legacyTimeout =
+        Number.isFinite(configuredLegacyTimeout) && configuredLegacyTimeout > 0
+          ? configuredLegacyTimeout
+          : 10000
+      const legacy = await IbexExchangeService({
+        base,
+        quote,
+        config: { ...config, timeout: legacyTimeout },
+      })
       if (legacy instanceof Error) return legacy
       legacyService = legacy
     }

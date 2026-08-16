@@ -341,6 +341,52 @@ describe("IbexSwapExchangeService", () => {
     const unsupportedKey = `${CacheKeys.CurrentTicker}:IbexSwap:BTC:JMD:unsupported`
     const statusKey = `${CacheKeys.CurrentTicker}:IbexSwap:BTC:JMD:status`
 
+    it("gives the legacy leg its own timeout instead of the probe's", async () => {
+      // createIbexSwap defaults `timeout` to 5s for GET /rates, but createIbex
+      // deliberately ships 10s for Rates v2 — forwarding this probe's config
+      // verbatim would run the JMD fallback, the whole point of this provider,
+      // at the tighter cap the legacy provider was explicitly kept away from.
+      ;(axios.get as jest.Mock).mockResolvedValue(unsupported)
+      const legacyFactory = jest
+        .spyOn(IbexImpl, "IbexExchangeService")
+        .mockResolvedValue({ fetchTicker: jest.fn(async () => legacyTicker) })
+
+      const service = await IbexSwapExchangeService({
+        base: "BTC",
+        quote: "JMD",
+        config: { cacheSeconds: 300, timeout: 5000 },
+      })
+      if (service instanceof Error) throw service
+      await service.fetchTicker()
+
+      expect(legacyFactory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          config: expect.objectContaining({ timeout: 10000 }),
+        }),
+      )
+    })
+
+    it("honours an explicit legacyTimeout override", async () => {
+      ;(axios.get as jest.Mock).mockResolvedValue(unsupported)
+      const legacyFactory = jest
+        .spyOn(IbexImpl, "IbexExchangeService")
+        .mockResolvedValue({ fetchTicker: jest.fn(async () => legacyTicker) })
+
+      const service = await IbexSwapExchangeService({
+        base: "BTC",
+        quote: "JMD",
+        config: { cacheSeconds: 300, timeout: 5000, legacyTimeout: 20000 },
+      })
+      if (service instanceof Error) throw service
+      await service.fetchTicker()
+
+      expect(legacyFactory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          config: expect.objectContaining({ timeout: 20000 }),
+        }),
+      )
+    })
+
     it("serves the pair from the legacy Ibex provider instead of erroring", async () => {
       ;(axios.get as jest.Mock).mockResolvedValue(unsupported)
       const legacyFetchTicker = jest.fn(async () => legacyTicker)
