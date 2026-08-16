@@ -16,11 +16,23 @@ import { AuthenticationError } from "ibex-client/dist/errors"
 import { IBEX } from "@config"
 
 import { AuthCache } from "../ibex/cache"
-import { getIbexId } from "../ibex"
+import { getIbexId, IbexExchangeService } from "../ibex"
 
 const mutex = new Mutex()
 
 type SwapRatesHttpResult = { status: number; body: unknown }
+
+// GET /rates covers fewer currencies than the legacy Rates v2 endpoint: JMD,
+// HTG and CAD (among others) answer 400 "to currency is not supported"
+// (verified live against sandbox). Those are not transient, and JMD is the
+// home market — failing them here would leave the app pricing Jamaica off a
+// mid-market FX provider instead of IBEX's own rate. Detect that answer and
+// serve the pair from the legacy provider instead.
+const isUnsupportedCurrencyBody = (body: unknown): boolean => {
+  if (!body || typeof body !== "object") return false
+  const { error } = body as { error?: unknown }
+  return typeof error === "string" && /not supported/i.test(error)
+}
 
 // IBEX "Swap Rates" provider (docs.poweredbyibex.io/reference/swap-rates).
 //
@@ -54,6 +66,24 @@ export const IbexSwapExchangeService = async ({
   const cacheTtlSecs = Number(cacheSeconds)
   const cacheKeyStatus = `${cacheKey}:status`
 
+  // Set once, when Swap Rates tells us this pair is unsupported; from then on
+  // every fetch for this instance is served by the legacy provider. The
+  // exchange factory memoises one service per base/quote, so this is per pair.
+  let legacyFallback: IExchangeService | null = null
+
+  const fetchViaLegacyProvider = async (): Promise<Ticker | ServiceError> => {
+    if (!legacyFallback) {
+      const legacy = await IbexExchangeService({ base, quote, config })
+      if (legacy instanceof Error) return legacy
+      legacyFallback = legacy
+      baseLogger.info(
+        { base, quote },
+        "IbexSwap: pair unsupported by Swap Rates, using legacy Ibex rates",
+      )
+    }
+    return legacyFallback.fetchTicker()
+  }
+
   const getCachedRates = async (): Promise<IbexSwapRates | undefined> => {
     const cachedRates = await LocalCacheService().get<IbexSwapRates>(cacheKey)
     if (cachedRates instanceof Error) return undefined
@@ -71,6 +101,10 @@ export const IbexSwapExchangeService = async ({
     const timestamp = new Date().getTime()
 
     try {
+      // Established fallback wins over everything else, including the cached
+      // error status below — that pair never comes back from Swap Rates.
+      if (legacyFallback) return fetchViaLegacyProvider()
+
       const cachedRates = await getCachedRates()
       if (cachedRates) return tickerFromRaw({ ...cachedRates, timestamp })
 
@@ -120,6 +154,9 @@ export const IbexSwapExchangeService = async ({
         return new ExchangeServiceError(authResp.message)
 
       const { status, body } = authResp as SwapRatesHttpResult
+      if (status === 400 && isUnsupportedCurrencyBody(body)) {
+        return fetchViaLegacyProvider()
+      }
       if (status >= 400) {
         await LocalCacheService().set<number>({
           key: cacheKeyStatus,

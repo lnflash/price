@@ -9,6 +9,7 @@ import {
 
 import * as LocalCacheServiceImpl from "@services/cache"
 import { IbexSwapExchangeService } from "@services/exchanges/ibex-swap"
+import * as IbexImpl from "@services/exchanges/ibex"
 
 // Live sandbox response for GET /rates?from=2&to=3 (BTC→USD). BOTH fields are
 // in USD-per-BTC: rate = selling BTC (bid side), inverseRate = the other side
@@ -288,5 +289,99 @@ describe("IbexSwapExchangeService", () => {
         ttlSecs: 300,
       }),
     )
+  })
+  describe("currencies Swap Rates does not support", () => {
+    // Verified live against sandbox: GET /rates?from=2&to=28 (JMD) answers
+    // 400 {"error":"to currency is not supported"} — likewise HTG and CAD.
+    // JMD is the home market, so this pair must still price off IBEX rather
+    // than falling through to a mid-market FX provider.
+    const unsupported = {
+      status: 400,
+      data: { error: "to currency is not supported" },
+    }
+
+    const legacyTicker = {
+      bid: toPrice(9_900_000),
+      ask: toPrice(9_950_000),
+      timestamp: toTimestamp(1_700_000_000_000),
+    }
+
+    it("serves the pair from the legacy Ibex provider instead of erroring", async () => {
+      ;(axios.get as jest.Mock).mockResolvedValue(unsupported)
+      const legacyFetchTicker = jest.fn(async () => legacyTicker)
+      jest
+        .spyOn(IbexImpl, "IbexExchangeService")
+        .mockResolvedValue({ fetchTicker: legacyFetchTicker })
+
+      const service = await IbexSwapExchangeService({
+        base: "BTC",
+        quote: "JMD",
+        config: { cacheSeconds: 300 },
+      })
+      if (service instanceof Error) throw service
+
+      await expect(service.fetchTicker()).resolves.toEqual(legacyTicker)
+      expect(legacyFetchTicker).toHaveBeenCalledTimes(1)
+    })
+
+    it("stops calling Swap Rates for that pair once the fallback is established", async () => {
+      ;(axios.get as jest.Mock).mockResolvedValue(unsupported)
+      const legacyFetchTicker = jest.fn(async () => legacyTicker)
+      const legacyFactory = jest
+        .spyOn(IbexImpl, "IbexExchangeService")
+        .mockResolvedValue({ fetchTicker: legacyFetchTicker })
+
+      const service = await IbexSwapExchangeService({
+        base: "BTC",
+        quote: "JMD",
+        config: { cacheSeconds: 300 },
+      })
+      if (service instanceof Error) throw service
+
+      await service.fetchTicker()
+      await service.fetchTicker()
+      await service.fetchTicker()
+
+      // one probe, then straight to the legacy provider — and the legacy
+      // service is built once, not per fetch
+      expect((axios.get as jest.Mock).mock.calls).toHaveLength(1)
+      expect(legacyFactory).toHaveBeenCalledTimes(1)
+      expect(legacyFetchTicker).toHaveBeenCalledTimes(3)
+    })
+
+    it("keeps erroring for a 400 that is not an unsupported-currency answer", async () => {
+      ;(axios.get as jest.Mock).mockResolvedValue({
+        status: 400,
+        data: { error: "malformed request" },
+      })
+      const legacyFactory = jest.spyOn(IbexImpl, "IbexExchangeService")
+
+      const service = await IbexSwapExchangeService({
+        base: "BTC",
+        quote: "USD",
+        config: { cacheSeconds: 300 },
+      })
+      if (service instanceof Error) throw service
+
+      const result = await service.fetchTicker()
+      expect(result).toBeInstanceOf(UnknownExchangeServiceError)
+      expect(legacyFactory).not.toHaveBeenCalled()
+    })
+
+    it("surfaces the legacy provider's error rather than masking it", async () => {
+      ;(axios.get as jest.Mock).mockResolvedValue(unsupported)
+      jest
+        .spyOn(IbexImpl, "IbexExchangeService")
+        .mockResolvedValue(new ExchangeServiceError("legacy unavailable"))
+
+      const service = await IbexSwapExchangeService({
+        base: "BTC",
+        quote: "HTG",
+        config: { cacheSeconds: 300 },
+      })
+      if (service instanceof Error) throw service
+
+      expect(await service.fetchTicker()).toBeInstanceOf(ExchangeServiceError)
+    })
   })
 })
