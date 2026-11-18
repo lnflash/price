@@ -23,7 +23,7 @@
     "codegen:notifications": "cd src/services/notifications/proto && buf generate"
   },
   "dependencies": {
-    "@grpc/grpc-js": "^1.14.4",
+    "@grpc/grpc-js": "^1.14.5",
     "@grpc/proto-loader": "^0.7.15",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/core": "^2.8.0",
@@ -42,7 +42,7 @@
     "dotenv": "^16.0.3",
     "google-protobuf": "^3.21.2",
     "grpc-health-check": "^2.0.0",
-    "js-yaml": "^4.3.1",
+    "js-yaml": "^4.3.2",
     "knex": "^3.0.1",
     "lodash.mergewith": "^4.6.2",
     "node-cron": "^3.0.3",

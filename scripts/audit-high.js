@@ -31,22 +31,11 @@ const readline = require("node:readline")
  * every one of those failure modes in CI. A gate nobody has watched fail is
  * indistinguishable from no gate.
  */
-const WAIVERS = [
-  {
-    id: "GHSA-5p2g-fcmc-qvqq",
-    module: "image-size",
-    reviewBy: "2026-11-16",
-    reason:
-      "DoS parsing a malicious ICNS image. No patched release exists (vulnerable <=2.0.2, latest published 2.0.2). Reached only via ibex-client>api>datauri, the readme-generated SDK's file-upload helper: neither price service parses images — realtime calls GET /rates and the oauth token endpoint, history reads its own postgres — so no attacker-supplied bytes reach this parser. Re-check for a patched release, or for an ibex-client that no longer bundles the `api` SDK.",
-  },
-  {
-    id: "GHSA-w3rx-r6r6-pgpr",
-    module: "image-size",
-    reviewBy: "2026-11-16",
-    reason:
-      "Same package and same reachability argument as GHSA-5p2g-fcmc-qvqq (JXL/HEIF parsers rather than ICNS). No patched release exists.",
-  },
-]
+// Empty since 2026-11-18: image-size 2.0.3 shipped the fix for both advisories
+// that were waived here (GHSA-5p2g-fcmc-qvqq, GHSA-w3rx-r6r6-pgpr), and the
+// root resolution now pins a patched release. Add an entry only when an
+// advisory has no patched release to move to.
+const WAIVERS = []
 
 const BLOCKING_SEVERITIES = new Set(["critical", "high"])
 
@@ -205,7 +194,7 @@ const collectAdvisory = (advisories, { advisory, resolution }) => {
   return advisories
 }
 
-const run = () => {
+const run = (waivers = WAIVERS) => {
   const advisories = new Map()
   let summary
   let parseFailed = false
@@ -228,6 +217,7 @@ const run = () => {
     const { failures, lines } = evaluate({
       advisories,
       summary,
+      waivers,
       today: new Date().toISOString().slice(0, 10),
     })
 
@@ -246,4 +236,4 @@ const run = () => {
 
 if (require.main === module) run()
 
-module.exports = { evaluate, collectAdvisory, WAIVERS }
+module.exports = { evaluate, collectAdvisory, run, WAIVERS }
