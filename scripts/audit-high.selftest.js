@@ -4,7 +4,8 @@
  *
  * A security gate is only worth its slot in CI if every path that should stop
  * a merge has been watched doing it. These cases run against the real decision
- * function in ./audit-high.js — including the two waivers it ships — so a
+ * function in ./audit-high.js with a fixed fixture waiver list
+ * (FIXTURE_WAIVERS), plus one end-to-end case against whatever WAIVERS ships, so a
  * change that silently disarms the gate (dropping the expiry check, waiving by
  * module name instead of advisory id, treating a missing summary as clean)
  * fails here rather than the next time something high lands in production
@@ -126,6 +127,13 @@ const summaryEvent = (counts = {}) =>
 /** The advisory stream that FIXTURE_WAIVERS are written against. */
 const waivedAdvisoryEvents = () =>
   FIXTURE_WAIVERS.map((w) => advisoryEvent({ id: w.id, module: w.module }))
+
+/**
+ * The advisory stream the shipped WAIVERS are written against. A clean run must
+ * carry these: the gate fails any waiver whose advisory no longer appears.
+ */
+const shippedAdvisoryEvents = () =>
+  WAIVERS.map((w) => advisoryEvent({ id: w.id, module: w.module }))
 
 const cases = []
 const test = (name, fn) => cases.push([name, fn])
@@ -474,12 +482,17 @@ test("e2e: a summary with only some advisories parsed exits 1, not 0", () => {
 test("e2e: the shipped waiver list passes a clean audit and fails an unpatched high", () => {
   // Runs the script as CI does, with whatever WAIVERS ships, so an edit to the
   // shipped list is exercised end to end and not only through the fixture.
-  const clean = runShippedGate(summaryEvent())
+  // The clean half still carries every shipped waiver's advisory: a waiver with
+  // no matching advisory fails the gate by design, so a bare summary would turn
+  // this case red the moment anyone adds a correct waiver.
+  const clean = runShippedGate(
+    [...shippedAdvisoryEvents(), summaryEvent({ high: WAIVERS.length })].join("\n"),
+  )
   assert.strictEqual(clean.status, 0, `expected exit 0, got ${clean.status}\n${clean.stderr}`)
 
   const unpatched = runShippedGate(
     [
-      ...WAIVERS.map((w) => advisoryEvent({ id: w.id, module: w.module })),
+      ...shippedAdvisoryEvents(),
       advisoryEvent({ id: "GHSA-unwaived-0004" }),
       summaryEvent({ high: WAIVERS.length + 1 }),
     ].join("\n"),
