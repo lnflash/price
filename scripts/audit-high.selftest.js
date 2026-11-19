@@ -4,7 +4,8 @@
  *
  * A security gate is only worth its slot in CI if every path that should stop
  * a merge has been watched doing it. These cases run against the real decision
- * function in ./audit-high.js — including the two waivers it ships — so a
+ * function in ./audit-high.js with a fixed fixture waiver list
+ * (FIXTURE_WAIVERS), plus one end-to-end case against whatever WAIVERS ships, so a
  * change that silently disarms the gate (dropping the expiry check, waiving by
  * module name instead of advisory id, treating a missing summary as clean)
  * fails here rather than the next time something high lands in production
@@ -56,9 +57,31 @@ const advisoryData = ({
 
 const advisory = (over) => collectAdvisory(new Map(), advisoryData(over))
 
-/** The advisory map the shipped WAIVERS are written against: one path each. */
+/**
+ * A fixed waiver list for the cases that need waivers to exist. The shipped
+ * WAIVERS list can be empty (and is, while every advisory has a patch), so the
+ * gate's waiver handling is proven against this instead. Far-future review
+ * dates keep the end-to-end runs, which measure expiry against the real date,
+ * from going stale.
+ */
+const FIXTURE_WAIVERS = [
+  {
+    id: "GHSA-fixture-0001",
+    module: "fixture-pkg",
+    reviewBy: "2999-12-31",
+    reason: "selftest fixture",
+  },
+  {
+    id: "GHSA-fixture-0002",
+    module: "fixture-pkg",
+    reviewBy: "2999-12-31",
+    reason: "selftest fixture",
+  },
+]
+
+/** The advisory map FIXTURE_WAIVERS are written against: one path each. */
 const waivedAdvisories = () =>
-  WAIVERS.reduce(
+  FIXTURE_WAIVERS.reduce(
     (advisories, w) =>
       collectAdvisory(advisories, advisoryData({ id: w.id, module: w.module })),
     new Map(),
@@ -74,11 +97,23 @@ const waiver = (over = {}) => ({
 
 // --- end-to-end helpers: the real script, real stdin, real exit codes -------
 
-const runGate = (input) =>
+/** The real script with the shipped WAIVERS, exactly as CI runs it. */
+const runShippedGate = (input) =>
   spawnSync(process.execPath, [require.resolve("./audit-high.js")], {
     input,
     encoding: "utf8",
   })
+
+/** The real run() on real stdin and exit codes, with FIXTURE_WAIVERS. */
+const runGate = (input) =>
+  spawnSync(
+    process.execPath,
+    [
+      "-e",
+      `require(${JSON.stringify(require.resolve("./audit-high.js"))}).run(${JSON.stringify(FIXTURE_WAIVERS)})`,
+    ],
+    { input, encoding: "utf8" },
+  )
 
 const advisoryEvent = (over) =>
   JSON.stringify({ type: "auditAdvisory", data: advisoryData(over) })
@@ -89,8 +124,15 @@ const summaryEvent = (counts = {}) =>
     data: { vulnerabilities: { ...cleanSummary, ...counts } },
   })
 
-/** The advisory stream that the shipped WAIVERS are written against. */
+/** The advisory stream that FIXTURE_WAIVERS are written against. */
 const waivedAdvisoryEvents = () =>
+  FIXTURE_WAIVERS.map((w) => advisoryEvent({ id: w.id, module: w.module }))
+
+/**
+ * The advisory stream the shipped WAIVERS are written against. A clean run must
+ * carry these: the gate fails any waiver whose advisory no longer appears.
+ */
+const shippedAdvisoryEvents = () =>
   WAIVERS.map((w) => advisoryEvent({ id: w.id, module: w.module }))
 
 const cases = []
@@ -180,7 +222,7 @@ test("a summary with critical paths but no advisories parsed fails, not passes",
 })
 
 test("a summary reporting more blocking paths than were parsed fails, not passes", () => {
-  // Partial blindness, which a zero/non-zero test cannot see: the two shipped
+  // Partial blindness, which a zero/non-zero test cannot see: the two fixture
   // waivers parse fine while the rest of the output vanishes. Every parsed
   // advisory is legitimately waived, so nothing else here fails — without the
   // path-count comparison this is a green gate with 15 unaccounted-for high
@@ -188,7 +230,7 @@ test("a summary reporting more blocking paths than were parsed fails, not passes
   const { failures } = evaluate({
     advisories: waivedAdvisories(),
     summary: { critical: 0, high: 17, moderate: 0, low: 0 },
-    waivers: WAIVERS,
+    waivers: FIXTURE_WAIVERS,
     today: TODAY,
   })
   assert.strictEqual(failures.length, 1)
@@ -391,16 +433,16 @@ test("e2e: an unwaived high exits 1 through the real script", () => {
     [
       ...waivedAdvisoryEvents(),
       advisoryEvent({ id: "GHSA-unwaived-0003" }),
-      summaryEvent({ high: WAIVERS.length + 1 }),
+      summaryEvent({ high: FIXTURE_WAIVERS.length + 1 }),
     ].join("\n"),
   )
   assert.strictEqual(status, 1, `expected exit 1, got ${status}\n${stderr}`)
   assert.match(stderr, /HIGH some-pkg \(GHSA-unwaived-0003\)/)
 })
 
-test("e2e: the shipped waivers alone exit 0 through the real script", () => {
+test("e2e: waived advisories alone exit 0 through the real script", () => {
   const { status, stdout, stderr } = runGate(
-    [...waivedAdvisoryEvents(), summaryEvent({ high: WAIVERS.length })].join("\n"),
+    [...waivedAdvisoryEvents(), summaryEvent({ high: FIXTURE_WAIVERS.length })].join("\n"),
   )
   assert.strictEqual(status, 0, `expected exit 0, got ${status}\n${stderr}`)
   assert.match(stdout, /No unwaived critical\/high advisories/)
@@ -410,7 +452,7 @@ test("e2e: unparsable audit output exits 1 even when nothing else fails", () => 
   // Everything here would pass on its own; only the malformed line must fail
   // it, so a broken audit stream can never read as a green gate.
   const { status, stderr } = runGate(
-    [...waivedAdvisoryEvents(), "{not json", summaryEvent({ high: WAIVERS.length })].join(
+    [...waivedAdvisoryEvents(), "{not json", summaryEvent({ high: FIXTURE_WAIVERS.length })].join(
       "\n",
     ),
   )
@@ -428,13 +470,35 @@ test("e2e: a summary with no advisories parsed exits 1, not 0", () => {
 
 test("e2e: a summary with only some advisories parsed exits 1, not 0", () => {
   // The partial version of the same regression, and the one that gets past a
-  // zero/non-zero check: the shipped waivers parse, the other 15 high paths
+  // zero/non-zero check: the waived advisories parse, the other 15 high paths
   // do not, and everything that did parse is legitimately waived.
   const { status, stderr } = runGate(
     [...waivedAdvisoryEvents(), summaryEvent({ high: 17 })].join("\n"),
   )
   assert.strictEqual(status, 1, `expected exit 1, got ${status}\n${stderr}`)
   assert.match(stderr, /but only 2 were parsed into advisories/)
+})
+
+test("e2e: the shipped waiver list passes a clean audit and fails an unpatched high", () => {
+  // Runs the script as CI does, with whatever WAIVERS ships, so an edit to the
+  // shipped list is exercised end to end and not only through the fixture.
+  // The clean half still carries every shipped waiver's advisory: a waiver with
+  // no matching advisory fails the gate by design, so a bare summary would turn
+  // this case red the moment anyone adds a correct waiver.
+  const clean = runShippedGate(
+    [...shippedAdvisoryEvents(), summaryEvent({ high: WAIVERS.length })].join("\n"),
+  )
+  assert.strictEqual(clean.status, 0, `expected exit 0, got ${clean.status}\n${clean.stderr}`)
+
+  const unpatched = runShippedGate(
+    [
+      ...shippedAdvisoryEvents(),
+      advisoryEvent({ id: "GHSA-unwaived-0004" }),
+      summaryEvent({ high: WAIVERS.length + 1 }),
+    ].join("\n"),
+  )
+  assert.strictEqual(unpatched.status, 1, `expected exit 1, got ${unpatched.status}`)
+  assert.match(unpatched.stderr, /GHSA-unwaived-0004/)
 })
 
 let failed = 0
